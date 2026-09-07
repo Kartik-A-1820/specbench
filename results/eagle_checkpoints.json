@@ -1,0 +1,54 @@
+{
+  "eagle_L1_I2816": {
+    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L1_I2816_final.pt",
+    "arch_version": 2,
+    "ce_below_plausibility_floor": false,
+    "num_layers": 1,
+    "intermediate_size": 2816,
+    "parameters": 35133440,
+    "final_total_loss": 2.437631623457925,
+    "final_ce_loss": 2.602506694688258,
+    "final_reg_loss": 0.9537565740379127,
+    "peak_vram_bytes": 1029829632,
+    "epochs": 3
+  },
+  "eagle_L1_I5632": {
+    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L1_I5632_final.pt",
+    "arch_version": 2,
+    "ce_below_plausibility_floor": false,
+    "num_layers": 1,
+    "intermediate_size": 5632,
+    "parameters": 52434944,
+    "final_total_loss": 2.126226261587635,
+    "final_ce_loss": 2.256363835908857,
+    "final_reg_loss": 0.9549886091481848,
+    "peak_vram_bytes": 1377170432,
+    "epochs": 3
+  },
+  "eagle_L2_I2816": {
+    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L2_I2816_final.pt",
+    "arch_version": 2,
+    "ce_below_plausibility_floor": false,
+    "num_layers": 2,
+    "intermediate_size": 2816,
+    "parameters": 61876224,
+    "final_total_loss": 2.139775380602047,
+    "final_ce_loss": 2.2717148188583973,
+    "final_reg_loss": 0.952321010740149,
+    "peak_vram_bytes": 1565996544,
+    "epochs": 3
+  },
+  "eagle_L2_I5632": {
+    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L2_I5632_final.pt",
+    "arch_version": 2,
+    "ce_below_plausibility_floor": false,
+    "num_layers": 2,
+    "intermediate_size": 5632,
+    "parameters": 96479232,
+    "final_total_loss": 1.896585301919417,
+    "final_ce_loss": 2.001573599820055,
+    "final_reg_loss": 0.9516910567916289,
+    "peak_vram_bytes": 2260153856,
+    "epochs": 3
+  }
+}

@@ -1,1 +1,37 @@
-{}
+{
+  "env": {
+    "torch_version": "2.5.1+cu121",
+    "cuda_version": "12.1",
+    "driver_version": "610.62",
+    "device": "NVIDIA GeForce GTX 1650 Ti",
+    "device_capability": [
+      7,
+      5
+    ],
+    "device_total_memory_bytes": 4294639616
+  },
+  "context_length": 2048,
+  "predicted": {
+    "target_weights_gb": 2.2,
+    "draft_weights_gb": 0.14,
+    "target_kv_cache_gb": 0.05,
+    "draft_kv_cache_gb": 0.01,
+    "cuda_context_gb": 0.3,
+    "transient_activations_gb": 0.1,
+    "total_gb": 2.8,
+    "context_length": 2048
+  },
+  "measured": {
+    "cuda_context_bytes": 512,
+    "target_weight_bytes": 2202205696,
+    "draft_weight_bytes": 137372160,
+    "target_kv_cache_bytes": 186793984,
+    "draft_kv_cache_bytes": 16777216,
+    "peak_allocated_bytes": 2679464448,
+    "free_bytes": 531202048,
+    "total_device_bytes": 4294639616,
+    "peak_allocated_gb": 2.679464448,
+    "headroom_vs_3_4gb": 0.720535552
+  },
+  "within_budget": true
+}
