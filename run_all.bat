@@ -36,12 +36,18 @@ REM  the whole point of writing one.
 set PYTHONUNBUFFERED=1
 
 REM --- Timestamped log file ------------------------------------------
-for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set LDT=%%I
-if "%LDT%"=="" (
-    set STAMP=manual
-) else (
-    set STAMP=!LDT:~0,8!_!LDT:~8,4!
+REM  wmic is absent on recent Windows 11 builds, which silently collapsed every
+REM  run onto one log file called run_manual.log. Two concurrent runs then
+REM  truncate each other's log, and a re-run destroys the record of the run
+REM  being diagnosed. PowerShell is already a dependency further down, so use
+REM  it; wmic stays as a fallback for older machines.
+set STAMP=
+for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss" 2^>nul') do set STAMP=%%I
+if "%STAMP%"=="" (
+    for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set LDT=%%I
+    if not "!LDT!"=="" set STAMP=!LDT:~0,8!_!LDT:~8,4!
 )
+if "%STAMP%"=="" set STAMP=manual
 if not exist "logs" mkdir "logs"
 if not exist "logs\stages" mkdir "logs\stages"
 set LOG=logs\run_%STAMP%.log
@@ -251,14 +257,17 @@ if exist "%STAGES%\phase2_collect.done" (
     )
 )
 
-if exist "%STAGES%\phase2_train.done" (
-    echo [skip] head training already done
-) else (
-    %PY% scripts\run_phase2_train.py --epochs 3 --done-marker "%STAGES%\phase2_train.done"
-    if errorlevel 1 (
-        echo [WARN] EAGLE head training failed. Skipping the Phase 2 sweep.
-        goto :STAGE8_SKIP
-    )
+REM  No marker gate on training. The marker records "the training stage ran",
+REM  which is coarser than "every head is current" — so after a fix to the head
+REM  architecture the marker would skip training while the checkpoints on disk
+REM  are still stale, and the sweep would then refuse and the run would
+REM  dead-end. run_phase2_train.py does the right check itself, comparing each
+REM  checkpoint against ARCH_VERSION, and is a fast no-op when nothing needs
+REM  retraining. Let the script decide.
+%PY% scripts\run_phase2_train.py --epochs 3 --done-marker "%STAGES%\phase2_train.done"
+if errorlevel 1 (
+    echo [WARN] EAGLE head training failed. Skipping the Phase 2 sweep.
+    goto :STAGE8_SKIP
 )
 
 if exist "%STAGES%\phase2_sweep.done" (
