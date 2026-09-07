@@ -58,6 +58,19 @@ from specbench.sampling import (
 from specbench.spec_decode import compute_acceptance, sample_residual
 
 
+# Bumped whenever a change to this file invalidates previously measured EAGLE
+# results. scripts/run_phase2_sweep.py records it in each per-head summary and
+# re-measures any head whose recorded version differs, so a fix to the decoding
+# path cannot be masked by the "summary already exists" skip.
+#
+#   1 — initial version.
+#   2 — the head carries its own KV cache across draft steps, and is seeded over
+#       the prompt. Version 1 called the head on length-1 sequences with no
+#       history, a computation it was never trained for; measured acceptance
+#       0.231 against 0.279 in the training regime.
+INFERENCE_VERSION = 2
+
+
 def _target_forward(
     target_model: torch.nn.Module,
     input_ids: torch.Tensor,
@@ -120,15 +133,41 @@ def generate_eagle(
     pending_token = int(input_ids[0, -1].item())
 
     target_cache = make_empty_cache()
+    # The head is an autoregressive decoder and needs its own KV cache, kept in
+    # step with the target's committed prefix and rolled back alongside it. It
+    # holds one entry per committed token, written when that token is first fed
+    # to the head as `pending`.
+    head_cache = make_empty_cache()
     target_forward_calls = 0
     head_forward_calls = 0
 
     if prefix_ids.shape[1] > 0:
         out = _target_forward(target_model, prefix_ids, target_cache)
         target_cache = out.past_key_values
+        prefix_hidden = out.hidden_states[-1]  # (1, P, hidden)
         # Predecessor feature of `pending`, i.e. f_{t-1} for the pairing above.
-        prev_feature = out.hidden_states[-1][0, -1, :]
+        prev_feature = prefix_hidden[0, -1, :]
         target_forward_calls += 1
+
+        # Seed the head's cache over the prompt, in one batched call, so that
+        # its cache length equals committed_len from the first round onwards.
+        # Without this the head's positions drift out of step with the target's
+        # and the rollback arithmetic silently addresses the wrong entries.
+        # It also gives the head the prompt as attention context, which is the
+        # regime it was trained in.
+        P = prefix_ids.shape[1]
+        hidden_size = prefix_hidden.shape[-1]
+        with torch.no_grad():
+            prev_seq = torch.cat(
+                [
+                    torch.zeros(1, 1, hidden_size, dtype=torch.float32, device=device),
+                    prefix_hidden[:, : P - 1, :].float(),
+                ],
+                dim=1,
+            )  # (1, P, hidden) — f_{i-1}, with zeros at i=0 as in training
+            tok_seq = token_embedding(prefix_ids).float()  # (1, P, hidden) — e(t_i)
+            eagle_head(prev_seq, tok_seq, past_key_values=head_cache, use_cache=True)
+        head_forward_calls += 1
     else:
         # Single-token prompt: there is no predecessor feature. Zeros are the
         # same thing the training data uses for the first position of a chunk.
@@ -159,6 +198,10 @@ def generate_eagle(
         feature = prev_feature
         current_token = pending_token
 
+        # The head's cache is rolled back to `committed_len` at the end of each
+        # round, so it starts this round holding exactly the committed prefix.
+        # Each of the K draft steps appends one entry; the first (for `pending`)
+        # is kept, the speculative remainder is discarded in the rollback below.
         for _step in range(K):
             with torch.no_grad():
                 tok_emb = token_embedding(
@@ -167,9 +210,16 @@ def generate_eagle(
                 predicted = eagle_head(
                     feature.float().view(1, 1, -1),
                     tok_emb,
+                    past_key_values=head_cache,
+                    use_cache=True,
                 )  # (1, 1, hidden)
                 predicted_1d = predicted[0, 0, :]
-                logits_1d = (predicted_1d.half() @ lm_head_weight.t()).float()
+                # Match the LM head's dtype rather than assuming FP16: the
+                # target is FP16 on the GPU but FP32 in CPU tests, and a
+                # hard-coded .half() makes the two paths diverge.
+                logits_1d = (
+                    predicted_1d.to(lm_head_weight.dtype) @ lm_head_weight.t()
+                ).float()
             head_forward_calls += 1
 
             q_i = logits_to_probs(logits_1d, temperature, top_k, top_p)
@@ -247,6 +297,31 @@ def generate_eagle(
         # ------------------------------------------------------------------
         new_committed_len = committed_len + 1 + accepted_count
         rollback_cache(target_cache, new_committed_len)
+
+        # The head's cache grew by K during drafting: one entry for `pending`
+        # (absolute position committed_len) and K-1 for x_1..x_{K-1}. The
+        # committed prefix needs entries through x_{accepted_count}, i.e. length
+        # committed_len + 1 + accepted_count. That is within what we have unless
+        # every proposal was accepted, in which case x_K was never fed to the
+        # head and the cache is one entry short — the same situation as the
+        # draft model in Phase 1, and handled the same way.
+        if accepted_count == K:
+            with torch.no_grad():
+                tok_emb = token_embedding(
+                    torch.tensor([[current_token]], dtype=torch.long, device=device)
+                ).float()
+                eagle_head(
+                    feature.float().view(1, 1, -1),
+                    tok_emb,
+                    past_key_values=head_cache,
+                    use_cache=True,
+                )
+            head_forward_calls += 1
+
+        # Entries for rejected proposals must go, for exactly the reason the
+        # target's must: otherwise the head attends to tokens never emitted.
+        rollback_cache(head_cache, new_committed_len)
+
         prev_feature = target_hidden_block[0, accepted_count, :]
         committed_len = new_committed_len
         pending_token = emitted_tokens[-1]
@@ -273,4 +348,8 @@ def generate_eagle(
         "draft_forward_calls": head_forward_calls,
         "residual_fallback_count": residual_fallback_count,
         "reproducible": seed is not None,
+        # Stamped into every run record so that measurements taken with an
+        # older decoding path can be identified and excluded from aggregation
+        # rather than silently averaged in with current ones.
+        "inference_version": INFERENCE_VERSION,
     }

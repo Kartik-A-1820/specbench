@@ -117,22 +117,52 @@ def main():
         print("Results file is empty.")
         return
 
-    # Group by (mode, draft_model, K).
+    # Drop EAGLE measurements taken with a superseded decoding path. They are
+    # real measurements of a different implementation, so averaging them in
+    # with current ones would produce a number that describes neither.
+    from specbench.eagle.spec_decode_eagle import INFERENCE_VERSION
+
+    before = len(records)
+    records = [
+        r
+        for r in records
+        if r.get("mode") != "spec_eagle" or r.get("inference_version") == INFERENCE_VERSION
+    ]
+    dropped = before - len(records)
+    if dropped:
+        print(
+            f"Excluded {dropped} EAGLE records measured with a decoding path older "
+            f"than inference v{INFERENCE_VERSION}."
+        )
+
+    # Group by (mode, draft_model, K, temperature). Temperature belongs in the
+    # key: a greedy baseline and a sampling baseline are different conditions,
+    # and pooling them would compare each speculative arm against a mixture of
+    # both. Baselines are likewise selected per temperature so that every
+    # comparison is paired within its own condition.
     groups = defaultdict(list)
     for r in records:
-        key = (r.get("mode", ""), r.get("draft_model", ""), r.get("K", 0))
+        key = (
+            r.get("mode", ""),
+            r.get("draft_model", ""),
+            r.get("K", 0),
+            r.get("temperature", 1.0),
+        )
         groups[key].append(r)
 
-    # Also add baseline to each spec group for paired comparison.
-    baseline_records = [r for r in records if r.get("mode") == "baseline"]
+    baselines_by_temp = defaultdict(list)
+    for r in records:
+        if r.get("mode") == "baseline":
+            baselines_by_temp[r.get("temperature", 1.0)].append(r)
 
     rows = []
-    for (mode, draft_model, K), group_records in groups.items():
+    for (mode, draft_model, K, temperature), group_records in groups.items():
         if mode == "baseline":
             continue
-        combined = baseline_records + group_records
+        combined = baselines_by_temp.get(temperature, []) + group_records
         agg = aggregate_config(combined)
         if agg:
+            agg["temperature"] = temperature
             rows.append(agg)
 
     if not rows:
@@ -142,11 +172,14 @@ def main():
     df = pd.DataFrame(rows)
     df.to_csv(PARETO_CSV, index=False)
     print(f"Pareto data written to {PARETO_CSV}")
-    print(df[["mode", "K", "draft_model", "mean_acceptance_length", "speedup",
-               "speedup_ci_lo", "speedup_ci_hi"]].to_string(index=False))
+    print(df[["mode", "K", "temperature", "draft_model", "mean_acceptance_length",
+              "speedup", "speedup_ci_lo", "speedup_ci_hi"]].to_string(index=False))
 
     # Produce the plot.
     try:
+        import matplotlib
+
+        matplotlib.use("Agg")  # No display available in a batch run.
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
 

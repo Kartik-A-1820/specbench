@@ -128,16 +128,28 @@ def load_draft_model(
     """
     Load the draft model (llama-68m) in FP16 with SDPA attention.
 
-    Returns (model, tokenizer).
+    Returns (model, None). The tokenizer is deliberately not loaded.
+
+    The draft and target must share a vocabulary for the accept/reject rule to
+    be meaningful at all — p and q have to be distributions over the same
+    index set — so there is only ever one tokenizer in play, the target's, and
+    every caller already discards this second one.
+
+    Not loading it also removes a real failure mode. llama-68m ships only a
+    SentencePiece `tokenizer.model` with no fast `tokenizer.json`, so
+    AutoTokenizer tries a slow-to-fast conversion that needs `protobuf` and
+    `sentencepiece` installed. Those are pulled in for a tokenizer whose output
+    is thrown away.
     """
     base = model_dir or DEFAULT_MODEL_DIR
     path = base / "llama-68m"
-    return _load_model(str(path), device=device)
+    return _load_model(str(path), device=device, load_tokenizer=False)
 
 
-def _load_model(path: str, device: str = "cuda") -> tuple:
+def _load_model(path: str, device: str = "cuda", load_tokenizer: bool = True) -> tuple:
     """
-    Internal helper. Loads model and tokenizer from a local directory.
+    Internal helper. Loads a model, and optionally its tokenizer, from a local
+    directory.
 
     Key choices:
       - torch_dtype=torch.float16: matches the target hardware (no bf16).
@@ -145,7 +157,11 @@ def _load_model(path: str, device: str = "cuda") -> tuple:
       - device_map=None + explicit .to(device): keeps the full model on one device
         so that torch.cuda.memory_allocated() gives an accurate weight footprint.
     """
-    tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
+    tokenizer = (
+        AutoTokenizer.from_pretrained(path, local_files_only=True)
+        if load_tokenizer
+        else None
+    )
     model = AutoModelForCausalLM.from_pretrained(
         path,
         torch_dtype=torch.float16,

@@ -224,6 +224,9 @@ def build_run_record(
         "top_k": top_k,
         "seed": seed,
         "reproducible": result.get("reproducible", False),
+        # Declared by the generator. Present only for paths that version
+        # themselves (currently the EAGLE decoder); None elsewhere.
+        "inference_version": result.get("inference_version"),
         "prompt_id": prompt_id,
         "prompt_tokens": prompt_tokens,
         "max_new_tokens": max_new_tokens,

@@ -100,26 +100,50 @@ def run_vram_probe(context_length: int = 2048) -> dict:
     # ----------------------------------------------------------------
     # Forward pass with full context on target.
     # ----------------------------------------------------------------
+    # The logits tensor returned by a prefill is measured separately from the
+    # KV cache. At this context length it is the larger of the two by some
+    # margin: 1 x 2048 x 32000 in FP16 is about 131 MB, against roughly 46 MB
+    # for TinyLlama's grouped-query KV cache. Folding it into the "KV cache"
+    # figure, which is what happens if the returned logits are left referenced,
+    # inflates that line by ~3x and makes the model architecture look like the
+    # memory problem when the vocabulary projection is.
     print(f"Running {context_length}-token forward pass on target...")
     dummy_ids = torch.ones(1, context_length, dtype=torch.long, device=DEVICE)
     if tokenizer.bos_token_id is not None:
         dummy_ids[:, 0] = tokenizer.bos_token_id
 
     target_cache = make_empty_cache()
-    _, target_cache = prefill_cache(target_model, dummy_ids, target_cache)
+    target_logits, target_cache = prefill_cache(target_model, dummy_ids, target_cache)
+    r_with_logits = vram_report("after_target_forward_with_logits")
+    target_logits_bytes = target_logits.numel() * target_logits.element_size()
+    del target_logits
+    torch.cuda.synchronize()
     r_target_kv = vram_report("after_target_forward")
     target_kv_bytes = r_target_kv["allocated_bytes"] - r_both["allocated_bytes"]
-    print(f"  Target KV cache: {target_kv_bytes / 1e9:.3f} GB (predicted: {predicted['target_kv_cache_gb']:.2f} GB)")
+    print(
+        f"  Target KV cache: {target_kv_bytes / 1e9:.3f} GB "
+        f"(predicted: {predicted['target_kv_cache_gb']:.2f} GB)"
+    )
+    print(
+        f"  Target prefill logits (transient): {target_logits_bytes / 1e9:.3f} GB "
+        f"— larger than the KV cache at this context length"
+    )
 
     # ----------------------------------------------------------------
     # Forward pass with full context on draft.
     # ----------------------------------------------------------------
     print(f"Running {context_length}-token forward pass on draft...")
     draft_cache = make_empty_cache()
-    _, draft_cache = prefill_cache(draft_model, dummy_ids, draft_cache)
+    draft_logits, draft_cache = prefill_cache(draft_model, dummy_ids, draft_cache)
+    draft_logits_bytes = draft_logits.numel() * draft_logits.element_size()
+    del draft_logits
+    torch.cuda.synchronize()
     r_draft_kv = vram_report("after_draft_forward")
     draft_kv_bytes = r_draft_kv["allocated_bytes"] - r_target_kv["allocated_bytes"]
-    print(f"  Draft KV cache: {draft_kv_bytes / 1e9:.3f} GB (predicted: {predicted['draft_kv_cache_gb']:.2f} GB)")
+    print(
+        f"  Draft KV cache: {draft_kv_bytes / 1e9:.3f} GB "
+        f"(predicted: {predicted['draft_kv_cache_gb']:.2f} GB)"
+    )
 
     peak_report = vram_report("peak")
     peak_bytes = peak_report["max_allocated_bytes"]
@@ -143,6 +167,9 @@ def run_vram_probe(context_length: int = 2048) -> dict:
             "draft_weight_bytes": draft_weight_bytes,
             "target_kv_cache_bytes": target_kv_bytes,
             "draft_kv_cache_bytes": draft_kv_bytes,
+            "target_prefill_logits_bytes": target_logits_bytes,
+            "draft_prefill_logits_bytes": draft_logits_bytes,
+            "allocated_with_logits_held_bytes": r_with_logits["allocated_bytes"],
             "peak_allocated_bytes": peak_bytes,
             "free_bytes": free_bytes,
             "total_device_bytes": total_bytes,

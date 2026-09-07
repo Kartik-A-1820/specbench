@@ -43,16 +43,34 @@ def load_summary() -> dict:
 
 
 def load_raw() -> list:
+    """
+    Load raw run records, excluding EAGLE measurements taken with a superseded
+    decoding path. Those are real measurements of a different implementation, so
+    averaging them in with current ones gives a number describing neither.
+    """
     if not RAW.exists():
         return []
+    try:
+        from specbench.eagle.spec_decode_eagle import INFERENCE_VERSION
+    except ImportError:
+        INFERENCE_VERSION = None
+
     out = []
     for line in RAW.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            INFERENCE_VERSION is not None
+            and rec.get("mode") == "spec_eagle"
+            and rec.get("inference_version") != INFERENCE_VERSION
+        ):
+            continue
+        out.append(rec)
     return out
 
 

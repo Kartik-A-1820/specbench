@@ -38,7 +38,7 @@ MODELS = [
 def download_model(repo_id: str, local_dir: Path) -> None:
     """Download a model from the Hub to a local directory."""
     local_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nDownloading {repo_id} → {local_dir}")
+    print(f"\nDownloading {repo_id} -> {local_dir}")
     snapshot_download(
         repo_id=repo_id,
         local_dir=str(local_dir),
@@ -64,9 +64,18 @@ def main():
 
     for m in MODELS:
         local_dir = model_dir / m["local_name"]
-        if local_dir.exists() and any(local_dir.iterdir()):
+        # "the directory is non-empty" is not good enough: an interrupted
+        # download leaves a directory full of blobs with no usable weights, and
+        # skipping it means the next stage fails with a confusing load error.
+        # Require a config plus at least one weights file, and otherwise call
+        # snapshot_download again — it resumes rather than restarting.
+        has_config = (local_dir / "config.json").exists()
+        has_weights = any(local_dir.glob("*.safetensors")) or any(local_dir.glob("*.bin"))
+        if has_config and has_weights:
             print(f"\n{m['role'].title()} model already present at {local_dir}. Skipping.")
         else:
+            if local_dir.exists():
+                print(f"\n{local_dir} exists but is incomplete; resuming download.")
             download_model(m["repo_id"], local_dir)
 
     print("\nAll models downloaded. Set HF_HUB_OFFLINE=1 to confirm offline operation:")
