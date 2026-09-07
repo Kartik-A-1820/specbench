@@ -1,0 +1,52 @@
+# specbench — .gitignore
+
+# Models directory (large binary files, not committed)
+models/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Pytest
+.pytest_cache/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Results: raw JSONL, aggregates and figures are committed. The large
+# intermediates are not.
+results/hidden_states/
+results/checkpoints/
+
+# Run logs and stage markers (machine- and run-specific).
+logs/
+
+# Build-time scratch documents, deleted by scripts/setup_repo.bat. Listed so
+# they cannot be re-added by accident.
+BUILD_BRIEF.md
+create.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

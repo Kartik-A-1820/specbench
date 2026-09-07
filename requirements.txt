@@ -1,0 +1,28 @@
+# specbench requirements
+#
+# torch is deliberately NOT listed here. Installing it from PyPI on Windows
+# gives a CPU-only wheel, every benchmark then runs on the CPU, and every
+# number produced is meaningless while nothing visibly fails. It must come
+# from the CUDA wheel index instead, which is a different --index-url and so
+# cannot live in the same requirements file:
+#
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# scripts\setup_env.bat does both, into a project-local .venv.
+# scripts\check_env.py refuses to proceed if torch turns out to be CPU-only.
+
+transformers==4.46.3
+accelerate==1.1.1
+safetensors==0.4.5
+huggingface-hub==0.26.2
+numpy==1.26.4
+scipy==1.14.1
+pandas==2.2.3
+matplotlib==3.9.2
+pytest==8.3.3
+tqdm==4.67.0
+
+# Phase 2 only: pulls the EAGLE head's training corpus (wikitext-2 + mbpp).
+# Phase 1 runs without it.
+datasets==3.1.0
