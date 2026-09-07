@@ -40,6 +40,17 @@ from transformers.models.llama.modeling_llama import (
 )
 
 
+# Bumped whenever a change to this module invalidates existing checkpoints.
+# scripts/run_phase2_train.py records it in the checkpoint manifest and retrains
+# any head whose recorded version differs, so a fix to the architecture cannot
+# be silently skipped by the "checkpoint already exists" resumability check.
+#
+#   1 — initial version.
+#   2 — explicit causal mask in forward(). Version 1 heads were trained with
+#       bidirectional attention and are worthless; they must be retrained.
+ARCH_VERSION = 2
+
+
 class EagleDraftHead(nn.Module):
     """
     EAGLE-style autoregressive draft head.
@@ -85,8 +96,13 @@ class EagleDraftHead(nn.Module):
         ])
         self.norm = LlamaRMSNorm(self.hidden_size, eps=getattr(config, "rms_norm_eps", 1e-5))
 
-        # Rotary embedding (required by LlamaDecoderLayer in transformers>=4.46).
-        self.rotary_emb = LlamaRotaryEmbedding(draft_config)
+        # Rotary embedding, required by LlamaDecoderLayer in transformers >= 4.46.
+        #
+        # The config must be passed by KEYWORD. LlamaRotaryEmbedding's first
+        # positional parameter is still `dim` for backwards compatibility, so
+        # passing the config positionally silently binds it to `dim` and blows
+        # up inside torch.arange with a confusing type error.
+        self.rotary_emb = LlamaRotaryEmbedding(config=draft_config)
 
     def forward(
         self,
@@ -101,7 +117,9 @@ class EagleDraftHead(nn.Module):
         Args:
             hidden_states: Target's last-layer hidden states, shape (batch, seq, hidden_size).
             token_embeds:  Token embeddings for the current tokens, shape (batch, seq, hidden_size).
-            attention_mask: Optional attention mask.
+            attention_mask: Optional additive attention mask. If None, a causal
+                            mask is built here — see the note below, this must
+                            not be left to the layer.
             position_ids:  Optional position ids.
 
         Returns:
@@ -119,6 +137,28 @@ class EagleDraftHead(nn.Module):
 
         # Compute rotary position embeddings required by LlamaDecoderLayer.
         position_embeddings = self.rotary_emb(x, position_ids)
+
+        # Build an EXPLICIT causal mask when the caller did not supply one.
+        #
+        # This is not defensive tidying; leaving it out is a silent correctness
+        # disaster during training. A bare LlamaDecoderLayer built from a plain
+        # LlamaConfig uses the "eager" attention path, and eager attention
+        # applies no mask at all when attention_mask is None — attention becomes
+        # bidirectional. Training then leaks the answer: the label for position
+        # t is the input token at position t+1, so the head learns to read it
+        # off the future instead of predicting it. Cross-entropy collapses to
+        # near zero, training looks excellent, and at inference — where the head
+        # runs one position at a time and has no future to read — the head is
+        # useless and acceptance goes to nothing.
+        #
+        # Constructing the mask here rather than relying on `is_causal` makes
+        # the behaviour independent of which attention implementation the config
+        # happens to select.
+        if attention_mask is None and seq_len > 1:
+            causal = torch.full(
+                (seq_len, seq_len), torch.finfo(x.dtype).min, device=device, dtype=x.dtype
+            ).triu(diagonal=1)
+            attention_mask = causal.unsqueeze(0).unsqueeze(0).expand(batch, 1, seq_len, seq_len)
 
         # Run through decoder layers.
         for layer in self.layers:

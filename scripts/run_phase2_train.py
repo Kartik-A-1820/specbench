@@ -25,7 +25,7 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from specbench.eagle.head import EagleDraftHead
+from specbench.eagle.head import ARCH_VERSION, EagleDraftHead
 from specbench.eagle.train import train_eagle_head
 from specbench.models import load_target_model, verify_cuda_environment
 
@@ -38,6 +38,14 @@ CHECKPOINTS_DIR = RESULTS_DIR / "checkpoints"
 # layers, at the target's own intermediate width and at half of it. Anything
 # larger stops fitting alongside AdamW state on 3.4 GB, which is itself a
 # finding and is recorded in docs/vram-budget.md.
+# The target model's own cross-entropy on the collected corpus, measured
+# directly as mean(-log softmax(lm_head(cached_hidden))[next_token]), is about
+# 2.98 (perplexity ~20). The head is trained to imitate that distribution, so
+# anything much below it is not learning, it is leakage. A generous floor of
+# half the teacher's CE flags the pathology without tripping on a head that is
+# genuinely doing well.
+MIN_PLAUSIBLE_CE = 1.5
+
 HEAD_CONFIGS = [
     {"name": "eagle_L1_I2816", "num_layers": 1, "intermediate_size": 2816},
     {"name": "eagle_L1_I5632", "num_layers": 1, "intermediate_size": 5632},
@@ -65,12 +73,33 @@ def main():
             sys.exit(1)
 
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    pending = [c for c in selected if not (CHECKPOINTS_DIR / f"{c['name']}_final.pt").exists()]
+
+    manifest_path = RESULTS_DIR / "eagle_checkpoints.json"
+    manifest = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    # A head is only skipped if its checkpoint exists AND was produced by the
+    # current head architecture. Skipping on file existence alone means a fix to
+    # the head silently reuses a checkpoint trained against the broken version.
+    pending = []
     for c in selected:
-        if c not in pending:
-            print(f"Checkpoint for {c['name']} already exists. Skipping.", flush=True)
+        name = c["name"]
+        have_file = (CHECKPOINTS_DIR / f"{name}_final.pt").exists()
+        recorded = manifest.get(name, {}).get("arch_version")
+        if have_file and recorded == ARCH_VERSION:
+            print(f"Checkpoint for {name} exists at arch v{ARCH_VERSION}. Skipping.", flush=True)
+            continue
+        if have_file:
+            print(
+                f"Checkpoint for {name} was built with arch v{recorded}, current is "
+                f"v{ARCH_VERSION}. Retraining.",
+                flush=True,
+            )
+        pending.append(c)
+
     if not pending:
-        print("All requested heads already trained.", flush=True)
+        print("All requested heads already trained at the current architecture.", flush=True)
         if args.done_marker:
             Path(args.done_marker).write_text("ok", encoding="utf-8")
         return
@@ -87,11 +116,6 @@ def main():
     del target_model
     torch.cuda.empty_cache()
     print("Target body released.", flush=True)
-
-    manifest_path = RESULTS_DIR / "eagle_checkpoints.json"
-    manifest = {}
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     for cfg in pending:
         print(f"\n{'=' * 60}\nTraining {cfg['name']}\n{'=' * 60}", flush=True)
@@ -123,10 +147,32 @@ def main():
         )
         print(f"  final total loss: {result['history']['total_loss'][-1]:.4f}", flush=True)
 
+        # Sanity floor on the cross-entropy. The head is trained to imitate the
+        # target model's next-token distribution, so it cannot legitimately beat
+        # the target's own cross-entropy on the same data — a student does not
+        # out-predict its teacher at reproducing the teacher. A CE far below
+        # that floor means the head is reading the label from somewhere it
+        # should not, which is what a missing causal mask does. Loud, because
+        # the alternative symptom is a Phase 2 benchmark that quietly shows no
+        # speedup and gets misread as "EAGLE does not help here".
+        final_ce = result["history"]["ce_loss"][-1]
+        if final_ce < MIN_PLAUSIBLE_CE:
+            print(
+                f"\n  WARNING: final cross-entropy {final_ce:.4f} is below the "
+                f"plausibility floor of {MIN_PLAUSIBLE_CE}. The head cannot predict "
+                "the target's own next token better than the target does. This "
+                "almost always means label leakage — check that attention inside "
+                "the head is causal (tests/test_eagle_head.py) before trusting any "
+                "Phase 2 result.\n",
+                flush=True,
+            )
+
         ckpt = CHECKPOINTS_DIR / f"{cfg['name']}_final.pt"
         torch.save(head.state_dict(), ckpt)
         manifest[cfg["name"]] = {
             "checkpoint": str(ckpt),
+            "arch_version": ARCH_VERSION,
+            "ce_below_plausibility_floor": bool(final_ce < MIN_PLAUSIBLE_CE),
             "num_layers": cfg["num_layers"],
             "intermediate_size": cfg["intermediate_size"],
             "parameters": int(n_params),

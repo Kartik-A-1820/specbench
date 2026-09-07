@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 from specbench.baseline import generate_baseline
-from specbench.eagle.head import EagleDraftHead
+from specbench.eagle.head import ARCH_VERSION, EagleDraftHead
 from specbench.eagle.spec_decode_eagle import generate_eagle
 from specbench.harness import Arm, merge_summary, run_multiarm_benchmark
 from specbench.models import load_target_model, verify_cuda_environment
@@ -66,6 +66,37 @@ def main():
 
     head_names = args.heads or sorted(manifest)
     head_names = [h for h in head_names if h in manifest]
+
+    # Refuse to benchmark a head trained against a different head architecture.
+    # Benchmarking a stale head does not fail: it produces a real, publishable
+    # looking acceptance rate for a model that was optimised for a computation
+    # it no longer performs. That is worse than no number at all.
+    stale = [h for h in head_names if manifest[h].get("arch_version") != ARCH_VERSION]
+    if stale:
+        print(
+            f"REFUSING TO RUN. These heads were trained against a different head\n"
+            f"architecture than the current one (v{ARCH_VERSION}):\n"
+            + "".join(
+                f"    {h}: arch v{manifest[h].get('arch_version')}\n" for h in stale
+            )
+            + "Re-run scripts/run_phase2_train.py to retrain them. It detects the\n"
+            "version mismatch and retrains automatically.",
+            flush=True,
+        )
+        sys.exit(3)
+
+    leaky = [h for h in head_names if manifest[h].get("ce_below_plausibility_floor")]
+    if leaky:
+        print(
+            "REFUSING TO RUN. These heads finished training with a cross-entropy\n"
+            "below the target model's own cross-entropy on the same data, which is\n"
+            "not possible without label leakage:\n"
+            + "".join(f"    {h}\n" for h in leaky)
+            + "See tests/test_eagle_head.py.",
+            flush=True,
+        )
+        sys.exit(4)
+
     if not head_names:
         print("No trained heads to benchmark.", flush=True)
         sys.exit(1)
