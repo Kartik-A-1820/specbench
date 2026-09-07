@@ -10,10 +10,12 @@ LlamaConfig uses the "eager" attention path, and eager attention applies no
 mask at all when attention_mask is None. Attention was therefore bidirectional
 during training. Since the label for position t is the input token at position
 t+1, the head could read its answer off the future. Cross-entropy collapsed to
-0.05 — against a floor of about 2.98, which is the target model's own
-cross-entropy on the same data, and no student can beat its teacher at
-imitating the teacher. At inference the head sees one position at a time with
-no future to read, so the learned strategy is worthless and acceptance
+0.053 — against a reference of 2.56, which is the target model's own
+cross-entropy on the same cached data. A head fitted to this data for a few
+epochs can edge slightly below that figure by overfitting, and the correctly
+trained head does (2.60, just above it). Fifty times below it is not
+overfitting; it is copying. At inference the head sees one position at a time
+with no future to read, so the learned strategy is worthless and acceptance
 collapses.
 
 Nothing crashes when this happens. Training loss looks superb. The only signals
@@ -132,6 +134,52 @@ def test_single_position_forward_matches_batched_prefix(head):
         f"Position 0 differs by {diff:.3e} between a batched forward and a "
         "length-1 forward. The training-time and inference-time computations "
         "have diverged."
+    )
+
+
+def test_kv_cached_stepping_matches_full_sequence(head):
+    """
+    Feeding the head one position at a time with a KV cache must reproduce the
+    full-sequence forward.
+
+    This is the property the inference path depends on. The head is an
+    autoregressive decoder: during training it sees a whole chunk and attends
+    over it, and at inference it is called once per draft step. Those two agree
+    only if the inference path carries a cache. Calling it repeatedly on
+    length-1 sequences with no cache is a different function — every step
+    attends to itself alone — and the head was never trained to compute it.
+
+    Measured cost of getting this wrong on this project: acceptance dropped
+    from 0.279 to 0.231, about a sixth of the head's usable quality, with no
+    other symptom because the accept/reject rule keeps the output correct.
+    """
+    from transformers import DynamicCache
+
+    torch.manual_seed(4)
+    B, T, H = 1, 10, head.hidden_size
+    hidden = torch.randn(B, T, H)
+    embeds = torch.randn(B, T, H)
+
+    with torch.no_grad():
+        full = head(hidden, embeds)
+
+        cache = DynamicCache()
+        stepped = []
+        for i in range(T):
+            out = head(
+                hidden[:, i : i + 1, :],
+                embeds[:, i : i + 1, :],
+                past_key_values=cache,
+                use_cache=True,
+            )
+            stepped.append(out[:, 0, :])
+        stepped = torch.stack(stepped, dim=1)
+
+    diff = (full - stepped).abs().max().item()
+    assert diff < 2e-4, (
+        f"Cached step-by-step output differs from the full-sequence forward by "
+        f"{diff:.3e}. The inference path is computing something the head was not "
+        "trained to compute, which costs acceptance rate silently."
     )
 
 

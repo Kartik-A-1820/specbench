@@ -39,11 +39,17 @@ CHECKPOINTS_DIR = RESULTS_DIR / "checkpoints"
 # larger stops fitting alongside AdamW state on 3.4 GB, which is itself a
 # finding and is recorded in docs/vram-budget.md.
 # The target model's own cross-entropy on the collected corpus, measured
-# directly as mean(-log softmax(lm_head(cached_hidden))[next_token]), is about
-# 2.98 (perplexity ~20). The head is trained to imitate that distribution, so
-# anything much below it is not learning, it is leakage. A generous floor of
-# half the teacher's CE flags the pathology without tripping on a head that is
-# genuinely doing well.
+# directly as mean(-log softmax(lm_head(cached_hidden))[next_token]) over 250
+# random documents (49,904 token positions), is 2.56 (perplexity 13.0).
+#
+# The head is distilling that distribution, so a CE far below it is not
+# learning, it is leakage. The floor here is deliberately generous rather than
+# set at 2.56: a head trained for several epochs on this exact data can
+# legitimately edge slightly below the teacher's zero-shot CE by fitting the
+# training set, and that is ordinary overfitting, not a bug. What this guard
+# exists to catch is the pathological case - the broken head reported 0.053,
+# roughly fifty times below the floor, which no amount of overfitting explains.
+TEACHER_CE_FLOOR = 2.56
 MIN_PLAUSIBLE_CE = 1.5
 
 HEAD_CONFIGS = [

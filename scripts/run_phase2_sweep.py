@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,7 +30,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 from specbench.baseline import generate_baseline
 from specbench.eagle.head import ARCH_VERSION, EagleDraftHead
-from specbench.eagle.spec_decode_eagle import generate_eagle
+from specbench.eagle.spec_decode_eagle import INFERENCE_VERSION, generate_eagle
 from specbench.harness import Arm, merge_summary, run_multiarm_benchmark
 from specbench.models import load_target_model, verify_cuda_environment
 
@@ -67,23 +68,42 @@ def main():
     head_names = args.heads or sorted(manifest)
     head_names = [h for h in head_names if h in manifest]
 
-    # Refuse to benchmark a head trained against a different head architecture.
-    # Benchmarking a stale head does not fail: it produces a real, publishable
-    # looking acceptance rate for a model that was optimised for a computation
-    # it no longer performs. That is worse than no number at all.
+    # A head trained against a different head architecture must never be
+    # benchmarked: it would produce a real, publishable-looking acceptance rate
+    # for a model optimised for a computation it no longer performs, which is
+    # worse than no number at all.
+    #
+    # Rather than dead-ending, retrain them here and carry on. The stage marker
+    # in run_all.bat records "the training stage ran", which is coarser than
+    # "every head is current" — so on a re-run after a fix to the head, training
+    # gets skipped by the marker while the checkpoints are still stale. Healing
+    # it here means one launch is enough regardless of what the markers say.
     stale = [h for h in head_names if manifest[h].get("arch_version") != ARCH_VERSION]
     if stale:
         print(
-            f"REFUSING TO RUN. These heads were trained against a different head\n"
-            f"architecture than the current one (v{ARCH_VERSION}):\n"
-            + "".join(
-                f"    {h}: arch v{manifest[h].get('arch_version')}\n" for h in stale
-            )
-            + "Re-run scripts/run_phase2_train.py to retrain them. It detects the\n"
-            "version mismatch and retrains automatically.",
+            f"These heads were trained against head architecture "
+            f"v{[manifest[h].get('arch_version') for h in stale]}, current is "
+            f"v{ARCH_VERSION}: {', '.join(stale)}",
             flush=True,
         )
-        sys.exit(3)
+        print("Retraining them before benchmarking.", flush=True)
+        trainer = Path(__file__).parent / "run_phase2_train.py"
+        rc = subprocess.call([sys.executable, str(trainer), "--configs", *stale])
+        if rc != 0:
+            print(f"Retraining failed with exit code {rc}. Not benchmarking.", flush=True)
+            sys.exit(3)
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        still_stale = [
+            h for h in head_names if manifest.get(h, {}).get("arch_version") != ARCH_VERSION
+        ]
+        if still_stale:
+            print(
+                f"REFUSING TO RUN. Still stale after retraining: {', '.join(still_stale)}",
+                flush=True,
+            )
+            sys.exit(3)
+        print("Retraining complete; all heads now at the current architecture.", flush=True)
 
     leaky = [h for h in head_names if manifest[h].get("ce_below_plausibility_floor")]
     if leaky:
@@ -115,9 +135,21 @@ def main():
     for head_name in head_names:
         out_path = RESULTS_DIR / f"phase2_{head_name}_summary.json"
         if out_path.exists():
-            print(f"{head_name}: summary already exists, skipping.", flush=True)
-            all_summaries.update(json.loads(out_path.read_text(encoding="utf-8")))
-            continue
+            existing = json.loads(out_path.read_text(encoding="utf-8"))
+            versions = {
+                s.get("inference_version")
+                for s in existing.values()
+                if isinstance(s, dict) and s.get("mode") == "spec_eagle"
+            }
+            if versions == {INFERENCE_VERSION}:
+                print(f"{head_name}: summary already at inference v{INFERENCE_VERSION}, skipping.", flush=True)
+                all_summaries.update(existing)
+                continue
+            print(
+                f"{head_name}: summary was measured with inference {versions or '{None}'}, "
+                f"current is v{INFERENCE_VERSION}. Re-measuring.",
+                flush=True,
+            )
 
         info = manifest[head_name]
         print(f"\n{'=' * 60}\nBenchmarking {head_name}\n{'=' * 60}", flush=True)
@@ -172,6 +204,7 @@ def main():
             sys.exit(1)
 
         for name, s in summaries.items():
+            s["inference_version"] = INFERENCE_VERSION
             s["head_parameters"] = info.get("parameters")
             s["head_num_layers"] = info.get("num_layers")
             s["head_intermediate_size"] = info.get("intermediate_size")
