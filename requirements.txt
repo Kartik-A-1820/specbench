@@ -23,6 +23,13 @@ matplotlib==3.9.2
 pytest==8.3.3
 tqdm==4.67.0
 
+# Needed only if a SentencePiece-only checkpoint has to be tokenised (the draft
+# model ships one). specbench does not load the draft tokenizer — the two models
+# share the target's vocabulary — but these are cheap insurance for anyone who
+# points the loader at a checkpoint without a fast tokenizer.json.
+protobuf==5.28.3
+sentencepiece==0.2.0
+
 # Phase 2 only: pulls the EAGLE head's training corpus (wikitext-2 + mbpp).
 # Phase 1 runs without it.
 datasets==3.1.0

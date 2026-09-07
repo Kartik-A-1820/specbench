@@ -19,6 +19,22 @@ REM ====================================================================
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
+REM --- Console and Python I/O encoding --------------------------------
+REM  The Windows console defaults to cp1252 here, and Python inherits it for
+REM  stdout. Any non-ASCII character in a print statement then raises
+REM  UnicodeEncodeError and kills the stage. Force UTF-8, and fall back to
+REM  backslash escapes rather than an exception if anything still cannot be
+REM  encoded.
+chcp 65001 >nul 2>&1
+set PYTHONIOENCODING=utf-8:backslashreplace
+set PYTHONUTF8=1
+
+REM  Unbuffered stdout. Python block-buffers stdout when it is redirected to a
+REM  file, so a long stage can appear frozen in the log for minutes while it is
+REM  in fact working. That makes a partial log much harder to diagnose, which is
+REM  the whole point of writing one.
+set PYTHONUNBUFFERED=1
+
 REM --- Timestamped log file ------------------------------------------
 for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set LDT=%%I
 if "%LDT%"=="" (
@@ -142,6 +158,14 @@ REM ====================================================================
 if exist "%STAGES%\tests_cpu.done" (
     echo [skip] already done
 ) else (
+    REM Head structure tests run first: they take seconds, need no GPU, and
+    REM catch the causal-mask leak that makes EAGLE training silently useless.
+    %PY% -m pytest tests\test_eagle_head.py -q
+    if errorlevel 1 (
+        echo [FATAL] EAGLE head structural tests failed. Attention inside the head
+        echo         is probably not causal, which makes any trained head worthless.
+        exit /b 4
+    )
     %PY% -m pytest tests\test_sampler_synthetic.py -q
     if errorlevel 1 (
         echo [FATAL] The synthetic sampler tests failed. The accept/reject rule is
@@ -240,7 +264,12 @@ if exist "%STAGES%\phase2_train.done" (
 if exist "%STAGES%\phase2_sweep.done" (
     echo [skip] sweep already done
 ) else (
-    %PY% scripts\run_phase2_sweep.py --k-values 1 2 3 4 6 8 ^
+    REM K is swept over {1,2,3,4,6} rather than out to 8. Phase 1 measured the
+    REM optimum at K=3 with K=8 already down at 1.10x and its CI touching 1.0,
+    REM so K=8 costs four more head-configurations' worth of runtime to confirm
+    REM a decline that is already established. Five arms x four heads is the
+    REM most informative sweep that fits in the time budget.
+    %PY% scripts\run_phase2_sweep.py --k-values 1 2 3 4 6 ^
         --max-new-tokens 128 --done-marker "%STAGES%\phase2_sweep.done"
     if errorlevel 1 (
         echo [WARN] Phase 2 sweep failed or was interrupted. Re-running run_all.bat
@@ -256,12 +285,17 @@ echo [STAGE 8 INCOMPLETE - Phase 2 results are not available]
 echo.
 
 REM ====================================================================
-echo === STAGE 9/9: figures ===
+echo === STAGE 9/9: figures and generated results document ===
 REM ====================================================================
 %PY% scripts\make_pareto.py
 if errorlevel 1 (
     echo [WARN] Figure generation failed. Numeric results are unaffected.
 )
+%PY% scripts\make_results_doc.py
+if errorlevel 1 (
+    echo [WARN] Could not regenerate docs\results.md.
+)
+call scripts\commit_fixes.bat < nul
 echo [STAGE 9 OK]
 echo.
 
