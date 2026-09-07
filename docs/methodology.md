@@ -31,29 +31,47 @@ included in reported statistics.
 
 ---
 
-## Interleaved A/B Design
-
-Baseline and speculative runs **alternate** prompt-by-prompt:
-
-```
-Prompt 0: baseline → spec
-Prompt 1: baseline → spec
-...
-Prompt 29: baseline → spec
-```
+## Interleaved multi-arm design
 
 This is the most important methodological decision in the harness.
 
-The alternative — running all baseline conditions first, then all speculative
-conditions — is common but incorrect for thermally limited hardware. A GTX 1650
-Ti in sustained operation will throttle its clock from ~1485 MHz to ~800–1000 MHz
-within the first 5–10 minutes of load. A blocked design attributes this drift to
-whichever condition ran second, inflating the speedup estimate by an amount
-proportional to how much the clock dropped.
+Every condition is an **arm**: the target-only baseline, and one arm per
+speculation depth (and, in Phase 2, per draft-head configuration). For each
+prompt, every arm runs exactly once, back to back, and the order of the arms is
+**rotated** by one position from prompt to prompt:
 
-The interleaved design ensures both conditions see the same thermal state at
-every prompt. GPU temperature and clock are recorded per run so thermal drift
-can be checked after the fact.
+```
+Prompt 0:  baseline, K=1, K=2, K=3, K=4, K=6, K=8
+Prompt 1:  K=1, K=2, K=3, K=4, K=6, K=8, baseline
+Prompt 2:  K=2, K=3, K=4, K=6, K=8, baseline, K=1
+...
+```
+
+Three things follow from this.
+
+**Thermal drift is shared, not attributed.** The alternative — all baseline
+runs first, then all speculative runs — is common and wrong on thermally
+limited hardware. A GTX 1650 Ti in a laptop chassis throttles from ~1485 MHz to
+roughly 800–1000 MHz within the first five to ten minutes of sustained load. A
+blocked design charges that entire drift to whichever condition ran second, and
+the resulting bias goes in whichever direction happens to flatter the
+experimenter. Interleaving puts every arm at essentially the same point on the
+thermal ramp for a given prompt.
+
+**Order within a prompt is not confounded with arm identity.** Interleaving
+alone is not enough: whichever arm always runs first pays a slightly colder
+cache and whichever runs last sits at the local temperature peak. Rotating the
+order spreads that cost evenly. Each record stores `arm_position`, so the
+residual effect can be estimated after the fact rather than assumed away.
+
+**One baseline serves every arm.** Running a separate baseline per speculation
+depth would mean six or seven measurements of the same quantity, taken at six
+or seven different points in a thermal ramp — slower and noisier than measuring
+it once per prompt and pairing every arm against it. Pairing is what makes the
+bootstrap below valid.
+
+GPU temperature and clock are recorded per run, so drift can be checked
+post hoc rather than taken on trust.
 
 ---
 
@@ -80,7 +98,11 @@ Resampling is **paired**: the same prompt indices are drawn for both conditions.
 This preserves the pairing and gives a tighter interval (prompt difficulty
 affects both conditions in the same direction).
 
-Results are presented as: `1.47× (95% CI 1.38–1.56)`.
+Results are presented in the form `<speedup>× (95% CI <low>–<high>)`. The
+numbers in that sentence are a format description, not a measurement; actual
+values live only in `docs/results.md`, which is generated from the raw data by
+`scripts/make_results_doc.py` and never edited by hand.
+
 A speedup without a confidence interval is not a complete result.
 
 ---
@@ -97,19 +119,45 @@ each additional draft forward pass per round has a non-zero cost.
 
 ---
 
-## Latency Distribution
+## Latency: what is measured, and what is not
 
-Per-token latency is reported as p50, p90, p99 of inter-token delays.
+Speculative decoding has characteristically **bursty** latency. A verification
+pass emits several tokens at the same instant, then the system pauses for the
+next round (K draft steps plus one verify). The distribution is bimodal: a
+spike at 0 ms for tokens that arrived together, and a second mode at the round
+duration. A mean hides exactly the property a user perceives as stutter.
 
-Speculative decoding has characteristically **bursty** latency:
-- A verify pass emits several tokens at once (near-zero inter-token delay
-  for the batch of accepted tokens).
-- Then the model pauses to complete the next round (draft K steps + verify).
+Two series are therefore recorded separately, and neither is inferred from the
+other:
 
-The distribution is bimodal: a sharp peak near 0 ms (tokens from a successful
-verify batch) and a peak at the verify-pass latency. The mean hides this
-bimodality, which is what the user actually perceives as a "stutter" pattern.
-Reporting percentiles makes the bimodality visible.
+| Series | Definition | Baseline meaning |
+|---|---|---|
+| `round_latencies_ms` | Wall-clock duration of one decoding round | Time per token |
+| `token_arrival_gaps_ms` | Interval between consecutive tokens becoming available | Time per token |
+
+For the speculative path, `token_arrival_gaps_ms` is 0.0 for every token after
+the first in a round. That is not a rounding artefact: those tokens genuinely
+became available simultaneously, out of one verification pass. p50 of that
+series can legitimately be 0 ms while p90 is large, and that bimodality is the
+finding, not a defect in the measurement.
+
+### How the timestamps are taken
+
+The generators themselves record a timestamp at the end of each round, and the
+harness derives both series from those. Timestamps are placed immediately after
+a `.item()` call that has already forced a device synchronisation, so no extra
+`cuda.synchronize()` is inserted anywhere inside the measured region. This
+matters for fairness: the baseline synchronises once per token and the
+speculative path once per round, so adding explicit barriers per timestamp
+would tax the baseline more heavily and manufacture a speedup.
+
+### What this replaces
+
+An earlier version of the harness recorded `wall_clock / n_tokens` repeated
+`n_tokens` times. Every percentile of that series is the mean by construction:
+p50 = p90 = p99, standard deviation exactly 0. Percentiles computed from a mean
+are not measurements of anything, and the burstiness above — the entire reason
+to report percentiles for this algorithm — is invisible in them.
 
 ---
 
