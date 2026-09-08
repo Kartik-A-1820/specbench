@@ -1,9 +1,27 @@
 # specbench — .gitignore
+#
+# Kept in the repository: source, tests, docs, figures, and the measurement
+# files under results/ (the numbers are the point of the project).
+# Excluded: model weights, trained checkpoints, cached hidden states, the
+# virtual environment, caches, and run logs.
 
-# Models directory (large binary files, not committed)
+# ---------------------------------------------------------------------------
+# Model weights (multi-GB, downloaded by scripts/download_models.py)
+# ---------------------------------------------------------------------------
 models/
 
-# Python cache
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# ---------------------------------------------------------------------------
+# Python caches and build output
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.pyo
@@ -15,38 +33,56 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
-.venv/
-venv/
-env/
-.env
-
-# Pytest
+# ---------------------------------------------------------------------------
+# Test caches
+# ---------------------------------------------------------------------------
 .pytest_cache/
 .cache/
-
-# Jupyter
+.coverage
+htmlcov/
 .ipynb_checkpoints/
 
-# Results: raw JSONL, aggregates and figures are committed. The large
-# intermediates are not.
-results/hidden_states/
+# ---------------------------------------------------------------------------
+# Phase 2 (EAGLE) intermediates.
+#
+# results/checkpoints/ holds ~3.8 GB of trained-head weights and
+# results/hidden_states/ the cached target features they were fitted to.
+# Both are reproducible from scripts/run_phase2_collect.py and
+# scripts/run_phase2_train.py. The *summaries* of these runs are committed.
+# ---------------------------------------------------------------------------
 results/checkpoints/
+results/hidden_states/
 
-# Run logs and stage markers (machine- and run-specific).
+# Torch/checkpoint blobs anywhere in the tree, as a backstop.
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.npy
+*.npz
+
+# ---------------------------------------------------------------------------
+# Run logs and stage markers (machine- and run-specific)
+# ---------------------------------------------------------------------------
 logs/
+*.log
 
-# Build-time scratch documents, deleted by scripts/setup_repo.bat. Listed so
-# they cannot be re-added by accident.
-BUILD_BRIEF.md
-create.md
+# ---------------------------------------------------------------------------
+# Local helper scripts that are not part of the project
+# ---------------------------------------------------------------------------
+finish_cleanup.bat
+push_to_github.bat
+scrub_build_scripts.bat
 
-# OS
+# ---------------------------------------------------------------------------
+# OS and editor
+# ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
-
-# IDE
+desktop.ini
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
