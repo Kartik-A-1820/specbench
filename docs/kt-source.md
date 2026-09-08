@@ -364,7 +364,24 @@ embedding and vocabulary projection. Since speedup is α/(1 + K·c), lowering c
 helps exactly as much as raising α.
 
 The cost is that a head is target-specific and must be trained, whereas a draft
-model can be downloaded. That is a real trade-off and worth conceding.
+model can be downloaded. That is a real trade-off, and on this project it is the
+one that decided the outcome.
+
+**Those four arguments are the case for EAGLE. This project measured the
+opposite.** Every trained head came in below 1.0x — slower than running the
+target alone — and lost to the downloadable llama-68m on both terms of
+alpha / (1 + K*c) simultaneously. Part VII gives the numbers and the diagnosis.
+
+The short version, stated here so this section is not read as a claim the
+results contradict: arguments two and four (shared embeddings, lower c) are
+about cost, and both turned out to be wrong on this hardware — the head is
+roughly twice as expensive per draft step as the small draft model, because it
+projects from hidden 2048 through a 32,000-row vocabulary in FP32 while
+llama-68m projects from hidden 768 in FP16. Arguments one and three are about
+quality, and they are conditional on the head actually being trained; on a
+250,000-token budget it memorised its corpus instead. None of this shows the
+method is wrong. It shows that the method's advantages are contingent, and that
+this project could not afford the thing they are contingent on.
 
 ### 4.3 The pairing that has to match
 
@@ -663,7 +680,33 @@ warrant checking the logit gap at the divergence point before assuming a bug.
 
 {{RESULTS:PHASE2}}
 
+{{RESULTS:EAGLEVSDRAFT}}
+
 {{RESULTS:COSTMODEL}}
+
+### Why 1.32x and not the 2-3x the literature reports
+
+The published speculative decoding results are mostly 2x to 3x. This project
+reached 1.32x. The gap is worth accounting for precisely, because two different
+explanations are available and only one of them is what the data says.
+
+The first candidate is the hardware: this machine is slow, so speculation
+cannot help as much. That is the intuitive answer and it is wrong, or at least
+irrelevant. Speedup is a ratio, and a slow target model makes both the numerator
+and the denominator slow. What matters is not how fast the device is but how the
+two terms of `alpha / (1 + K·c)` come out on it.
+
+The second candidate is acceptance, and this is the one the measurements
+support. The section below fixes both terms against the measured data and shows
+that c is not the binding constraint here — that even a hypothetical drafter
+costing nothing at all would not have reached 2x with this draft model. What
+caps this configuration is how often llama-68m and TinyLlama agree.
+
+That distinction matters for what to do next, which is the practical value of
+having the decomposition rather than just the headline. It says the effort
+belongs on the numerator.
+
+{{RESULTS:ROOFLINE}}
 
 ---
 
@@ -693,15 +736,40 @@ across sequences. At large batch the arithmetic intensity rises past the ridge
 point, verification stops being nearly free, and speculative decoding's benefit
 shrinks. Everything here is a statement about single-stream latency.
 
-**EAGLE head training is small.** A 250 K-token feature cache and three epochs
-is far below what the EAGLE papers use. Measured acceptance for the head is a
-floor on what the architecture can reach, not an estimate of it.
+**EAGLE head training is small, and this dominates the Phase 2 result.** A
+250 K-token feature cache and three epochs is orders of magnitude below what the
+EAGLE papers use. The heads overfit it: acceptance is about 0.28 on their own
+training documents and about 0.05 on held-out benchmark prompts. Every Phase 2
+number is therefore a measurement of that training budget, not of the method.
+They are a floor on what the architecture can reach, not an estimate of it.
 
 **EAGLE training corpus is narrow.** wikitext-2 plus mbpp: general prose and
-short Python. The benchmark prompt set contains idioms underrepresented there.
+short Python. The benchmark prompt set contains idioms underrepresented there,
+which compounds the overfitting above.
+
+**The head runs in FP32.** Training was done in FP32 and inference kept it, so
+each draft step pays roughly double the arithmetic it needs, and the head's cost
+ratio c lands at 0.11 to 0.16 against llama-68m's 0.064 to 0.088. This is an
+implementation choice, not a property of the method, and it is not something the
+measured numbers should be read as indicting.
 
 **No cross-hardware validation.** The VRAM arithmetic and model selection were
 validated on this machine only.
+
+**One target model, so the cost decomposition rests on two points.** The
+draft-cost analysis separates a per-byte term from a per-layer term using two
+models, which is two observations for two parameters and therefore zero degrees
+of freedom. The decomposition is reported as a bracket — c falls between what
+pure bandwidth predicts and what pure per-layer cost predicts — rather than as a
+fitted split, because two points cannot support a fitted split. Measuring a
+third model at a different depth-to-size ratio would turn the bracket into an
+estimate.
+
+**One draft model in the sampling sweep.** Every conclusion about acceptance is
+a conclusion about llama-68m drafting TinyLlama. That the two are not the same
+model family is the leading explanation for the low alpha, but it is an
+explanation, not a measurement: no same-family pair was benchmarked, so the
+size of the effect is unquantified here.
 
 ---
 
@@ -859,12 +927,89 @@ is that **any distillation loss has a floor, and checking against it is nearly
 free**. That check now runs automatically, and the sweep refuses to benchmark a
 head that trips it.
 
+**Q: Your EAGLE head is slower than the baseline. Doesn't that mean EAGLE
+doesn't work?**
+
+No — it means my head was undertrained, and I can show that rather than assert
+it. Two pieces of evidence.
+
+First, the generalisation gap. Measured on cached documents from its own
+training corpus, the head's acceptance probability is about 0.28. Measured on
+the held-out benchmark prompts it is about 0.05 — that is what an acceptance
+length of 1.047 at K=1 implies, and K=1 is the clean case because only the
+first draft step runs, on a real target feature. Same head, same temperature,
+roughly a six-fold gap. It memorised 250,000 tokens rather than learning the
+target's distribution.
+
+Second, the capacity sweep. Larger heads reached lower *training* cross-entropy
+— 2.00 at 96.5 M parameters against 2.60 at 35.1 M — while benchmark acceptance
+stayed flat at 1.06 to 1.09 tokens per round. Capacity bought fit and bought no
+generalisation. That is overfitting's signature, and it is not what a method
+failing on its merits looks like.
+
+There is also a cost half that has nothing to do with training. The head is
+about twice as expensive per draft step as llama-68m — c of 0.11 to 0.16
+against 0.064 to 0.088 — because it projects from hidden 2048 through a
+32,000-row vocabulary in FP32, while llama-68m projects from hidden 768 in
+FP16. So it lost on both terms of alpha / (1 + K*c) at once. Running the head in
+FP16 would roughly halve that term and is the first thing I would fix.
+
+The part I would want credit for is that the same two-parameter cost model that
+predicts the Phase 1 sweep also predicts every EAGLE point to within one to two
+percent. The negative result is not an anomaly; it is the model working.
+
+**Q: How do you know that isn't just a bug in your EAGLE implementation?**
+
+Because three bugs in it were found and fixed before these numbers were taken,
+and each one is now covered by a test that fails without the fix.
+
+The head's attention was bidirectional during training, so it read labels from
+the future — caught by the loss falling roughly fifty times below the teacher's
+cross-entropy floor. The inference feature/token pairing was off by one relative
+to training. And the head ran without a KV cache at inference, a computation it
+was never trained for.
+
+Worth being honest about the third one: I predicted fixing it would raise
+acceptance from about 1.13 to about 1.35 tokens per round. It did not — the
+corrected path measured 1.05 to 1.06, statistically indistinguishable from the
+broken one. The fix was necessary for correctness and irrelevant to the outcome,
+and finding that out is what redirected the diagnosis to overfitting, which is
+where the effect actually was.
+
+Beyond that, the structural argument: in speculative decoding every draft-side
+bug is a performance bug, because the accept/reject rule absorbs it. So the
+draft path cannot be validated by output correctness and needs exactly the kind
+of targeted tests above.
+
 **Q: What would you do next, with more time or better hardware?**
 
-In priority order: train the EAGLE head properly (the current cache is two
-orders of magnitude smaller than the papers use, and it is the cheapest
-available α improvement); implement tree attention, so that multiple draft
-candidates are verified in one pass instead of a single linear chain, which
-raises α without raising the number of target passes; adapt K online from a
-running acceptance estimate; and measure at longer contexts and non-unit batch
-sizes to find where the bandwidth-bound premise stops holding.
+In priority order, and the order is set by what the measurements say rather than
+by what sounds interesting.
+
+**Train the head on enough data.** This is the whole Phase 2 result. The
+measured generalisation gap — acceptance 0.28 on training documents against 0.05
+held out — says the head is data-starved, not that the architecture is wrong.
+Collection is the bottleneck: features cost 4 KB per token on disk and the
+target has to run over the corpus once. Scaling to tens of millions of tokens
+means streaming the collection rather than caching all of it, which is a real
+engineering change, not a bigger number in a config.
+
+**Run the head in FP16.** Roughly halves c, which the cost model says converts
+directly into speedup. Cheap, and worth doing before any conclusion about
+whether feature-level drafting is competitive here.
+
+**Hold out a validation split during head training.** The overfitting was only
+visible because the benchmark disagreed with the training loss. A validation
+split would have shown it during training, in minutes, instead of after a
+two-hour sweep.
+
+**Tree attention**, so several draft candidates are verified in one pass rather
+than a single linear chain — raises α without raising the number of target
+passes, and is the main thing separating this implementation from a modern one.
+
+**Adapt K online** from a running acceptance estimate. The measured optimum
+differs between greedy (K=2) and sampling (K=3), and by prompt domain, so a
+fixed K is leaving speedup on the table.
+
+**Measure at longer contexts and non-unit batch sizes**, to find where the
+bandwidth-bound premise that justifies the whole method stops holding.

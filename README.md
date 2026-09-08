@@ -6,15 +6,24 @@
 
 ## Result
 
-> **No benchmark has been run yet, so there is no speedup to report.** This
-> section stays empty until `run_all.bat` completes Stage 7 and writes real
-> measurements to `results/`.
->
-> No expected, estimated or illustrative figure is given here on purpose. A
-> placeholder number in a README is the easiest thing in a project to mistake
-> for a measurement.
+**1.321x** (95% CI 1.235–1.406) at K = 3 with ancestral sampling, and **1.442x**
+(95% CI 1.373–1.510) at K = 2 greedy, against a target-only baseline of
+11.40 tokens/s on a GTX 1650 Ti Mobile. Every figure is an interleaved paired
+measurement over 29 scored prompts with bootstrap intervals; no point estimate
+is reported without one.
 
-To produce results, double-click `run_all.bat` (or run it from a shell). It
+The speedup is capped by acceptance, not by draft cost. The drafter contributes
+about 18% of per-round cost at the optimum, so a drafter of literally zero cost
+would still only reach 1.80x with this pair — the highest acceptance length
+measured anywhere in the sweep. `llama-68m` and TinyLlama share the Llama
+vocabulary and little else, and that shows up directly in α. The full
+decomposition, including where this machine sits against its memory-bandwidth
+roofline, is in the handover document.
+
+A trained EAGLE draft head (Phase 2) reached **0.938x** — a genuine slowdown.
+That is reported as measured, with the diagnosis, in `docs/results.md`.
+
+To reproduce, double-click `run_all.bat` (or run it from a shell). It
 provisions the environment, downloads the models, runs the correctness tests,
 and then benchmarks. It is resumable: every stage skips itself if its output
 artifact already exists.
@@ -128,7 +137,16 @@ Results are written to `results/raw_measurements.jsonl` and aggregated to
 
 ## Results Summary
 
-> Pending first benchmark run. See `docs/results.md` for the results template.
+| Configuration | Best K | Speedup | 95% CI | α (tokens/round) |
+|---|---|---|---|---|
+| Phase 1, sampling (T = 1.0) | 3 | 1.321x | 1.235–1.406 | 1.703 |
+| Phase 1, greedy (T = 0.0) | 2 | 1.442x | 1.373–1.510 | 1.722 |
+| Phase 2, EAGLE head | 1 | 0.938x | 0.921–0.956 | 1.074 |
+
+Baselines: 11.40 tokens/s sampling, 11.47 tokens/s greedy, target model only.
+See `docs/results.md` for the full sweep, latency percentiles and per-domain
+breakdown — that file is machine-written from the raw measurements, and a
+configuration that has not run shows `NOT MEASURED` rather than a number.
 
 All reported speedups carry 95% bootstrap confidence intervals computed as
 the ratio of aggregate throughputs (ratio-of-means, paired resampling over

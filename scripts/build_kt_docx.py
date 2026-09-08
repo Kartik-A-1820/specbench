@@ -25,6 +25,10 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from specbench.costmodel import fit_c_from_arms
+
 PROJECT_ROOT = Path(__file__).parent.parent
 RESULTS = PROJECT_ROOT / "results"
 SOURCE = PROJECT_ROOT / "docs" / "kt-source.md"
@@ -322,6 +326,122 @@ def block_phase2(summary: dict) -> list:
     return out
 
 
+def block_eagle_vs_draft(summary: dict) -> list:
+    """
+    Head-to-head: the trained EAGLE head against the Phase 1 draft model, on the
+    same target, the same prompts and the same measurement design.
+    """
+    out = [{"type": "heading3", "text": "EAGLE head vs. the separate draft model"}]
+    b1, p1 = arms_for_prefix(summary, "phase1_T1.0")
+    ckpts = load_json("eagle_checkpoints.json") or {}
+    if not b1 or not p1 or not ckpts:
+        out.append({"type": "para", "text": NOT_MEASURED})
+        return out
+
+    n_tokens = b1.get("max_new_tokens", 128)
+    t_target_ms = (n_tokens / b1["mean_tps"]) / b1["mean_target_forward_calls"] * 1000.0
+
+    def draft_cost(s, t_ms):
+        total_ms = n_tokens / s["mean_tps"] * 1000.0
+        n_d = max(s.get("mean_draft_forward_calls", 0), 1)
+        return (total_ms - s["mean_target_forward_calls"] * t_ms) / n_d / t_ms
+
+    rows = [["Drafter", "Params", "Best speedup", "at K", "alpha", "c (draft/target)"]]
+
+    bestK = max(p1, key=lambda k: p1[k]["speedup"])
+    b = p1[bestK]
+    rows.append(
+        [
+            "llama-68m (Phase 1)",
+            "68 M",
+            f"{b['speedup']:.3f}x",
+            str(bestK),
+            f"{b['mean_acceptance_length']:.3f}",
+            f"{draft_cost(b, t_target_ms):.3f}",
+        ]
+    )
+    for name in sorted(ckpts):
+        bh, ph = arms_for_prefix(summary, f"phase2_{name}")
+        if not bh or not ph:
+            continue
+        kbest = max(ph, key=lambda k: ph[k]["speedup"])
+        s = ph[kbest]
+        rows.append(
+            [
+                name,
+                f"{ckpts[name].get('parameters', 0) / 1e6:.1f} M",
+                f"{s['speedup']:.3f}x",
+                str(kbest),
+                f"{s['mean_acceptance_length']:.3f}",
+                f"{draft_cost(s, t_target_ms):.3f}",
+            ]
+        )
+    out.append({"type": "table", "rows": rows})
+
+    out.append(
+        {
+            "type": "para",
+            "text": "The trained head loses to the off-the-shelf draft model, and "
+            "loses on both terms of speedup = alpha / (1 + K*c) at once. Its "
+            "acceptance length is near 1.0, meaning almost nothing it proposes "
+            "survives verification, and each of its draft steps costs roughly "
+            "twice what a llama-68m step costs. Every EAGLE configuration "
+            "measured here is slower than simply running the target model "
+            "alone.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "This is a real result, not a bug, and it is worth being precise "
+            "about why — three earlier versions of it WERE bugs, and each was "
+            "found and fixed before these numbers were taken. The head's "
+            "attention was bidirectional during training; its inference "
+            "feature/token pairing was off by one; and it ran without a KV "
+            "cache at inference. All three are fixed and covered by tests. What "
+            "remains is not an implementation defect.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "The cause is that the head is drastically undertrained, and the "
+            "evidence is a generalisation gap that can be measured directly. On "
+            "cached documents from its own training corpus the head reaches an "
+            "acceptance probability of about 0.28. On the held-out benchmark "
+            "prompts it achieves about 0.05, which is what an acceptance length "
+            "of 1.05 at K=1 implies. Same head, same temperature, roughly a "
+            "six-fold gap: it has memorised 250,000 tokens of wikitext and mbpp "
+            "rather than learned the target's distribution. llama-68m, "
+            "pretrained on billions of tokens, reaches about 0.45 on those same "
+            "held-out prompts.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "The capacity sweep corroborates it. Larger heads reached lower "
+            "TRAINING cross-entropy — 2.00 at 96.5 M parameters against 2.60 at "
+            "35.1 M — while their benchmark acceptance stayed flat at roughly "
+            "1.06 to 1.09 tokens per round. Capacity bought fit on the training "
+            "set and bought nothing on held-out data, which is the signature of "
+            "overfitting rather than of a method that does not work.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "The honest summary is that this is a measurement of a "
+            "250,000-token training budget, not a measurement of EAGLE. The "
+            "published method trains on orders of magnitude more data. What this "
+            "project can legitimately claim is the negative result under its own "
+            "constraints, plus the reason, plus the fact that the reason is "
+            "measurable rather than assumed.",
+        }
+    )
+    return out
+
+
 def block_costmodel(summary: dict) -> list:
     """
     Fit the round-cost model to the measured data and show that it predicts the
@@ -335,21 +455,13 @@ def block_costmodel(summary: dict) -> list:
         return out
 
     n_tokens = baseline.get("max_new_tokens", 128)
-    # Cost of one baseline target forward pass, from measured throughput.
-    base_seconds = n_tokens / baseline["mean_tps"]
-    t_target_ms = base_seconds / baseline["mean_target_forward_calls"] * 1000.0
 
-    # Solve for the draft-pass cost c from each speculative arm:
-    #   total_time = n_target * t_target + n_draft * t_draft
-    c_estimates = []
-    for K, s in spec.items():
-        total_s = n_tokens / s["mean_tps"]
-        n_t = s["mean_target_forward_calls"]
-        n_d = s["mean_draft_forward_calls"]
-        if n_d <= 0:
-            continue
-        t_draft_ms = (total_s * 1000.0 - n_t * t_target_ms) / n_d
-        c_estimates.append((K, t_draft_ms, t_draft_ms / t_target_ms))
+    # The fit itself lives in specbench/costmodel.py, so that this block and
+    # the roofline analysis below derive c from one implementation rather than
+    # two that might drift apart.
+    fit = fit_c_from_arms(baseline, spec)
+    t_target_ms = fit["t_target_ms"]
+    c_estimates = [(e["K"], e["t_draft_ms"], e["c"]) for e in fit["per_k"]]
 
     out.append(
         {
@@ -408,6 +520,302 @@ def block_costmodel(summary: dict) -> list:
                 "the way the theory says it should.",
             }
         )
+
+    # The same model, applied to the EAGLE arms. If it predicts those too, the
+    # negative Phase 2 result is explained by the same mechanics rather than by
+    # something unaccounted for.
+    ckpts = load_json("eagle_checkpoints.json") or {}
+    erows = [["Head", "K", "alpha", "c", "Predicted", "Measured", "Error"]]
+    any_e = False
+    for name in sorted(ckpts):
+        bh, ph = arms_for_prefix(summary, f"phase2_{name}")
+        if not bh or not ph:
+            continue
+        for K in sorted(ph):
+            s = ph[K]
+            total_ms = n_tokens / s["mean_tps"] * 1000.0
+            n_d = max(s.get("mean_draft_forward_calls", 0), 1)
+            c = (total_ms - s["mean_target_forward_calls"] * t_target_ms) / n_d / t_target_ms
+            pred = s["mean_acceptance_length"] / (1.0 + K * c)
+            any_e = True
+            erows.append(
+                [
+                    name,
+                    str(K),
+                    f"{s['mean_acceptance_length']:.3f}",
+                    f"{c:.3f}",
+                    f"{pred:.3f}",
+                    f"{s['speedup']:.3f}",
+                    f"{(pred - s['speedup']) / s['speedup'] * 100:+.1f}%",
+                ]
+            )
+    if any_e:
+        out.append(
+            {
+                "type": "para",
+                "text": "The same model applied to the EAGLE arms, with c measured "
+                "per configuration rather than assumed:",
+            }
+        )
+        out.append({"type": "table", "rows": erows})
+        out.append(
+            {
+                "type": "para",
+                "text": "Agreement here is tighter than for the draft model — within "
+                "about one to two percent — because the head's cost is dominated by "
+                "one large, regular matrix multiplication per step rather than by a "
+                "whole small transformer, so the linear cost term fits it better. "
+                "The value of this is that the Phase 2 negative result is not an "
+                "anomaly needing a special explanation. The same two-parameter model "
+                "that predicts where the draft model peaks also predicts, from "
+                "independently measured alpha and c, that every EAGLE configuration "
+                "lands below 1.0. Nothing unaccounted for is happening.",
+            }
+        )
+    return out
+
+
+# Nominal memory bandwidth of the GTX 1650 Ti Mobile, from the specification:
+# 128-bit bus at 12 Gbps effective. Every roofline figure below is derived from
+# this one constant and from measured quantities; nothing else is assumed.
+DEVICE_BANDWIDTH_BYTES_PER_S = 192e9
+
+# Layer counts for the two Phase 1 models, from their config.json. Used to
+# separate a per-byte cost from a per-layer cost.
+TARGET_LAYERS = 22   # TinyLlama-1.1B-Chat-v1.0
+DRAFT_LAYERS = 2     # JackFram/llama-68m
+
+
+def block_roofline(summary: dict) -> list:
+    """
+    Decompose the measured forward-pass costs against the memory-bandwidth
+    roofline, and establish which of the two cost-model terms actually caps
+    this configuration.
+
+    Every number is derived from results/summary.json and results/vram_probe.json.
+    Nothing here required a model or a run that does not exist.
+    """
+    out = [{"type": "heading3", "text": "How close to the memory-bandwidth roofline does this run?"}]
+    baseline, spec = arms_for_prefix(summary, "phase1_T1.0")
+    probe = load_json("vram_probe.json")
+    if not baseline or not spec or not probe:
+        out.append({"type": "para", "text": NOT_MEASURED})
+        return out
+
+    measured = probe.get("measured", {})
+    target_bytes = measured.get("target_weight_bytes")
+    draft_bytes = measured.get("draft_weight_bytes")
+    if not target_bytes or not draft_bytes:
+        out.append({"type": "para", "text": NOT_MEASURED})
+        return out
+
+    fit = fit_c_from_arms(baseline, spec)
+    if not fit.get("ok"):
+        out.append({"type": "para", "text": NOT_MEASURED})
+        return out
+
+    t_target_ms = fit["t_target_ms"]
+    t_draft_ms = float(np.mean([e["t_draft_ms"] for e in fit["per_k"]]))
+    roof_target_ms = target_bytes / DEVICE_BANDWIDTH_BYTES_PER_S * 1000.0
+    roof_draft_ms = draft_bytes / DEVICE_BANDWIDTH_BYTES_PER_S * 1000.0
+    frac_target = roof_target_ms / t_target_ms
+    frac_draft = roof_draft_ms / t_draft_ms
+
+    out.append(
+        {
+            "type": "para",
+            "text": "Part I argued that batch-1 decoding is bandwidth-bound, which "
+            "is the premise the whole method rests on. It is worth checking that "
+            "premise against what the device actually did, because the answer turns "
+            "out to qualify it. Reading the target's "
+            f"{target_bytes / 1e9:.2f} GB of weights once across a "
+            f"{DEVICE_BANDWIDTH_BYTES_PER_S / 1e9:.0f} GB/s bus takes "
+            f"{roof_target_ms:.2f} ms. The measured forward pass takes "
+            f"{t_target_ms:.1f} ms.",
+        }
+    )
+
+    rows = [[
+        "Model", "Weights", "Layers", "Roofline (ms)", "Measured (ms)",
+        "% of roofline", "Effective GB/s",
+    ]]
+    for label, wbytes, layers, roof, meas in [
+        ("TinyLlama-1.1B (target)", target_bytes, TARGET_LAYERS, roof_target_ms, t_target_ms),
+        ("llama-68m (draft)", draft_bytes, DRAFT_LAYERS, roof_draft_ms, t_draft_ms),
+    ]:
+        rows.append([
+            label,
+            f"{wbytes / 1e9:.3f} GB",
+            str(layers),
+            f"{roof:.2f}",
+            f"{meas:.2f}",
+            f"{roof / meas * 100:.1f}%",
+            f"{wbytes / (meas / 1000.0) / 1e9:.1f}",
+        ])
+    out.append({"type": "table", "rows": rows})
+
+    out.append(
+        {
+            "type": "para",
+            "text": f"So a decode step reaches about {frac_target * 100:.0f}% of the "
+            "memory-bandwidth roofline, not the near-100% the simple model implies. "
+            f"The effective bandwidth on the target is "
+            f"{target_bytes / (t_target_ms / 1000.0) / 1e9:.0f} GB/s against a "
+            f"nominal {DEVICE_BANDWIDTH_BYTES_PER_S / 1e9:.0f}. The missing time is "
+            "kernel launch latency, attention over the KV cache, the WDDM display "
+            "driver model's scheduling, and Python between the layers. This is a "
+            "statement about the software stack and the device, not about "
+            "speculative decoding: it applies identically to the baseline and to "
+            "every speculative arm, and it caps absolute throughput rather than the "
+            "ratio between them.",
+        }
+    )
+
+    # ------------------------------------------------------------------
+    # Where c comes from: bytes or depth?
+    # ------------------------------------------------------------------
+    byte_ratio = draft_bytes / target_bytes
+    depth_ratio = DRAFT_LAYERS / TARGET_LAYERS
+    c = fit["c"]
+    out.append({"type": "heading4", "text": "What sets the draft cost c"})
+    out.append(
+        {
+            "type": "para",
+            "text": "The interesting consequence is for c, the draft pass measured "
+            "in target passes. If a forward pass were purely weight streaming, c "
+            "would be the ratio of the two models' weights. If it were purely "
+            "per-layer overhead — a fixed cost paid once per layer regardless of how "
+            "big that layer is — c would be the ratio of their depths. The measured "
+            "value sits between the two, which says both mechanisms are present and "
+            "neither alone accounts for it.",
+        }
+    )
+    crows = [["Predictor", "Value", "What it would mean"]]
+    crows.append([
+        "Weight ratio (bytes)",
+        f"{byte_ratio:.4f}",
+        f"{draft_bytes / 1e9:.3f} GB / {target_bytes / 1e9:.3f} GB — pure bandwidth",
+    ])
+    crows.append([
+        "Depth ratio (layers)",
+        f"{depth_ratio:.4f}",
+        f"{DRAFT_LAYERS} / {TARGET_LAYERS} layers — pure per-layer overhead",
+    ])
+    crows.append([
+        "Measured c",
+        f"{c:.4f}",
+        "Fitted from the sweep, between the two",
+    ])
+    out.append({"type": "table", "rows": crows})
+
+    per_layer_target = t_target_ms / TARGET_LAYERS
+    per_layer_draft = t_draft_ms / DRAFT_LAYERS
+    out.append(
+        {
+            "type": "para",
+            "text": "The per-layer view makes the same point more directly. One "
+            f"target layer costs {per_layer_target:.2f} ms and one draft layer "
+            f"{per_layer_draft:.2f} ms, a factor of "
+            f"{per_layer_target / per_layer_draft:.2f}, while a target layer holds "
+            f"{(target_bytes / TARGET_LAYERS) / (draft_bytes / DRAFT_LAYERS):.2f} "
+            "times as many bytes as a draft layer. Cost per layer is markedly "
+            "sublinear in bytes per layer, which is the signature of a real fixed "
+            "cost being paid once per layer.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "The practical reading is that on this device a drafter should "
+            "be chosen for shallowness as much as for size. A model that is small "
+            "in parameters but deep pays a per-layer toll that its parameter count "
+            "does not predict. llama-68m happens to be both — 68 M parameters in "
+            f"two layers — which is why c came out at {c:.3f} rather than "
+            "something considerably worse. That was luck rather than design in the "
+            "original model choice, and it is worth knowing deliberately.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "This decomposition rests on two models, which is two "
+            "observations for two unknowns. It is reported as a bracket — c lies "
+            "between the byte ratio and the depth ratio — and deliberately not as a "
+            "fitted split, because two points cannot support one. A third model at a "
+            "different depth-to-size ratio would settle it.",
+        }
+    )
+
+    # ------------------------------------------------------------------
+    # The binding constraint: alpha, not c.
+    # ------------------------------------------------------------------
+    out.append({"type": "heading4", "text": "Which term is actually binding"})
+    best_k = max(spec, key=lambda k: spec[k]["speedup"])
+    best = spec[best_k]
+    alpha_max_k = max(spec, key=lambda k: spec[k]["mean_acceptance_length"])
+    alpha_max = spec[alpha_max_k]["mean_acceptance_length"]
+
+    rows2 = [["K", "alpha", "Measured speedup", "Speedup if the draft were free (c = 0)"]]
+    for K in sorted(spec):
+        s = spec[K]
+        rows2.append([
+            str(K),
+            f"{s['mean_acceptance_length']:.3f}",
+            f"{s['speedup']:.3f}x",
+            f"{s['mean_acceptance_length']:.3f}x",
+        ])
+    out.append(
+        {
+            "type": "para",
+            "text": "Setting c to zero in alpha / (1 + K·c) gives the speedup a "
+            "drafter of literally no cost would deliver — the ceiling this draft "
+            "model's acceptance rate permits, whatever the hardware does. It is just "
+            "alpha.",
+        }
+    )
+    out.append({"type": "table", "rows": rows2})
+    out.append(
+        {
+            "type": "para",
+            "text": f"The best measured configuration is K = {best_k} at "
+            f"{best['speedup']:.3f}x. The highest acceptance length anywhere in the "
+            f"sweep is {alpha_max:.3f} tokens per round, at K = {alpha_max_k}. So "
+            "even an infinitely cheap drafter with this acceptance rate would top "
+            f"out at {alpha_max:.2f}x, and reaching a published 2.5x would require "
+            f"about {2.5 / alpha_max:.1f} times the acceptance this pair achieves. "
+            "Removing the entire draft cost would not get there.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "That is the answer to why this project measured 1.32x where the "
+            f"literature reports 2x to 3x. It is not that c is too high: c = {c:.3f} "
+            "means the drafter contributes only "
+            f"{best_k * c / (1 + best_k * c) * 100:.0f}% of the per-round cost at the "
+            "optimum. It is that alpha is too low, and alpha is a property of how "
+            "often the draft model and the target model agree. llama-68m and "
+            "TinyLlama-1.1B share the Llama vocabulary and essentially nothing else "
+            "— different pretraining corpora, different instruction tuning, no "
+            "shared checkpoint ancestry. Published results that reach 2x to 3x "
+            "generally use a drafter distilled from, or trained alongside, its "
+            "target.",
+        }
+    )
+    out.append(
+        {
+            "type": "para",
+            "text": "Which is what makes this a useful negative rather than a "
+            "disappointing number: the decomposition says exactly where the "
+            "remaining headroom is. Effort spent making the drafter cheaper is "
+            "close to wasted on this configuration. Effort spent on draft-target "
+            "agreement — a same-family drafter, or a head trained against this "
+            "target on enough data — is where the factor of two lives. Part IV's "
+            "EAGLE attempt was aimed at precisely that term, and its failure is a "
+            "measurement of a 250,000-token training budget rather than of the "
+            "approach.",
+        }
+    )
     return out
 
 
@@ -600,8 +1008,12 @@ def main() -> int:
                 blocks.extend(block_domain(raw))
             elif key == "PHASE2":
                 blocks.extend(block_phase2(summary))
+            elif key == "EAGLEVSDRAFT":
+                blocks.extend(block_eagle_vs_draft(summary))
             elif key == "COSTMODEL":
                 blocks.extend(block_costmodel(summary))
+            elif key == "ROOFLINE":
+                blocks.extend(block_roofline(summary))
             continue
         blocks.append(block)
 
