@@ -1,0 +1,22 @@
+# specbench — line ending policy
+#
+# The benchmark scripts run on Windows and write their JSON and JSONL results
+# with CRLF, while the same files were committed with LF. Git then reports
+# every results file as wholly rewritten whenever a run finishes, which buries
+# the one or two files that genuinely changed under several thousand lines of
+# noise and makes it impossible to review a run's output by reading a diff.
+#
+# `text=auto` normalises text files to LF in the repository while leaving the
+# working tree alone, so a CRLF file on disk and an LF file in the index are
+# understood to be the same file.
+* text=auto
+
+# Binary formats, listed explicitly rather than left to auto-detection. A
+# false positive here would corrupt the file on checkout.
+*.docx binary
+*.pt   binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.safetensors binary
