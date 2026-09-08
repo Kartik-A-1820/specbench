@@ -176,7 +176,10 @@ def main():
         ckpt = CHECKPOINTS_DIR / f"{cfg['name']}_final.pt"
         torch.save(head.state_dict(), ckpt)
         manifest[cfg["name"]] = {
-            "checkpoint": str(ckpt),
+            # Recorded relative to the project root: the manifest is committed,
+            # and an absolute path from whichever machine trained the head is
+            # meaningless in a clone.
+            "checkpoint": ckpt.relative_to(PROJECT_ROOT).as_posix(),
             "arch_version": ARCH_VERSION,
             "ce_below_plausibility_floor": bool(final_ce < MIN_PLAUSIBLE_CE),
             "num_layers": cfg["num_layers"],

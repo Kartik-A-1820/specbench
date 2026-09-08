@@ -58,7 +58,8 @@ def run_vram_probe(context_length: int = 2048) -> dict:
     reset_peak_memory()
 
     # ----------------------------------------------------------------
-    # Predicted values (from §3.1 of the build brief).
+    # Predicted values, derived in docs/vram-budget.md. The probe exists to
+    # check these against what the device actually allocates.
     # ----------------------------------------------------------------
     predicted = {
         "target_weights_gb": 2.20,

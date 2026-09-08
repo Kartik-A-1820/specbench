@@ -119,12 +119,11 @@ if errorlevel 1 (
 echo [STEP 4 OK]
 echo.
 
-echo === STEP 5/5: figures, results document, commits ===
+echo === STEP 5/5: figures and results document ===
 %PY% scripts\make_pareto.py
 if errorlevel 1 echo [WARN] Figure generation failed.
 %PY% scripts\make_results_doc.py
 if errorlevel 1 echo [WARN] Could not regenerate docs\results.md.
-call scripts\commit_fixes.bat < nul
 echo [STEP 5 OK]
 echo.
 

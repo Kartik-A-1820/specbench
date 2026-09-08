@@ -1,6 +1,7 @@
 # specbench
 
-**An implementation of speculative decoding, with a correctness test suite, built to be benchmarked on a 4 GB laptop GPU.**
+**Speculative decoding on a 4 GB laptop GPU: 1.32x measured, with the speedup
+ceiling derived from first principles.**
 
 ---
 
@@ -15,7 +16,7 @@ is reported without one.
 The speedup is capped by acceptance, not by draft cost. The drafter contributes
 about 18% of per-round cost at the optimum, so a drafter of literally zero cost
 would still only reach 1.80x with this pair — the highest acceptance length
-measured anywhere in the sweep. `llama-68m` and TinyLlama share the Llama
+measured anywhere in the sampling sweep. `llama-68m` and TinyLlama share the Llama
 vocabulary and little else, and that shows up directly in α. The full
 decomposition, including where this machine sits against its memory-bandwidth
 roofline, is in the handover document.

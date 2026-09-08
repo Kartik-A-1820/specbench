@@ -1,6 +1,6 @@
 {
   "eagle_L1_I2816": {
-    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L1_I2816_final.pt",
+    "checkpoint": "results/checkpoints/eagle_L1_I2816_final.pt",
     "arch_version": 2,
     "ce_below_plausibility_floor": false,
     "num_layers": 1,
@@ -13,7 +13,7 @@
     "epochs": 3
   },
   "eagle_L1_I5632": {
-    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L1_I5632_final.pt",
+    "checkpoint": "results/checkpoints/eagle_L1_I5632_final.pt",
     "arch_version": 2,
     "ce_below_plausibility_floor": false,
     "num_layers": 1,
@@ -26,7 +26,7 @@
     "epochs": 3
   },
   "eagle_L2_I2816": {
-    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L2_I2816_final.pt",
+    "checkpoint": "results/checkpoints/eagle_L2_I2816_final.pt",
     "arch_version": 2,
     "ce_below_plausibility_floor": false,
     "num_layers": 2,
@@ -39,7 +39,7 @@
     "epochs": 3
   },
   "eagle_L2_I5632": {
-    "checkpoint": "F:\\EDU\\specbench\\results\\checkpoints\\eagle_L2_I5632_final.pt",
+    "checkpoint": "results/checkpoints/eagle_L2_I5632_final.pt",
     "arch_version": 2,
     "ce_below_plausibility_floor": false,
     "num_layers": 2,

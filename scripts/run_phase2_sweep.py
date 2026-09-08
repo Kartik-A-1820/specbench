@@ -159,7 +159,10 @@ def main():
             num_draft_layers=info["num_layers"],
             intermediate_size=info["intermediate_size"],
         )
-        head.load_state_dict(torch.load(info["checkpoint"], map_location="cpu"))
+        # Manifest paths are relative to the project root; older manifests may
+        # hold an absolute path, which Path treats as already-resolved.
+        ckpt_path = PROJECT_ROOT / info["checkpoint"]
+        head.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
         head = head.to("cuda").float().eval()
 
         def make_arm(K: int, head=head) -> Arm:

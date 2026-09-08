@@ -132,11 +132,15 @@ echo.
 
 REM ====================================================================
 echo === STAGE 2/9: repository hygiene and git ===
+REM
+REM  Nothing to do: version control is managed directly, not by this
+REM  runner. The stage number is kept so the stage markers written by
+REM  earlier runs stay valid.
 REM ====================================================================
 if exist "%STAGES%\repo.done" (
     echo [skip] already done
 ) else (
-    call scripts\setup_repo.bat
+    echo [skip] version control is not managed by this runner
     echo ok> "%STAGES%\repo.done"
 )
 echo [STAGE 2 OK]
@@ -304,7 +308,7 @@ if errorlevel 1 (
 if errorlevel 1 (
     echo [WARN] Could not regenerate docs\results.md.
 )
-call scripts\commit_fixes.bat < nul
+echo [note] results regenerated; commit them yourself if you want them kept.
 echo [STAGE 9 OK]
 echo.
 
