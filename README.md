@@ -1,194 +1,104 @@
 # specbench
 
-**Speculative decoding on a 4 GB laptop GPU: 1.32x measured, with the speedup
-ceiling derived from first principles.**
+**A reproducible study of speculative decoding under a small GPU memory budget.**
 
----
+Speculative decoding uses a cheaper draft model to propose tokens, then lets the target model verify them. This repository implements the decoding loop, KV-cache rollback, correctness checks, paired benchmarks, and a trained EAGLE-style draft head. It is intended for readers who want to inspect the tradeoffs and reproduce the measurements.
 
-## Result
+## Published result
 
-**1.321x** (95% CI 1.235–1.406) at K = 3 with ancestral sampling, and **1.442x**
-(95% CI 1.373–1.510) at K = 2 greedy, against a target-only baseline of
-11.40 tokens/s on a GTX 1650 Ti Mobile. Every figure is an interleaved paired
-measurement over 29 scored prompts with bootstrap intervals; no point estimate
-is reported without one.
+| Experiment | Measured speedup | 95% bootstrap interval |
+| --- | --- | --- |
+| Separate draft model, sampling, K=3 | **1.321×** | 1.235–1.406 |
+| Separate draft model, greedy, K=2 | **1.442×** | 1.373–1.510 |
+| Best reported EAGLE-style head configuration | **0.938×** | 0.921–0.956 |
 
-The speedup is capped by acceptance, not by draft cost. The drafter contributes
-about 18% of per-round cost at the optimum, so a drafter of literally zero cost
-would still only reach 1.80x with this pair — the highest acceptance length
-measured anywhere in the sampling sweep. `llama-68m` and TinyLlama share the Llama
-vocabulary and little else, and that shows up directly in α. The full
-decomposition, including where this machine sits against its memory-bandwidth
-roofline, is in the handover document.
+These are repository measurements on one **GTX 1650 Ti 4 GB** laptop, using TinyLlama-1.1B as the target and llama-68m as the separate draft. The paired benchmark uses 29 scored prompts and 128 generated tokens per prompt. The trained-head result is a slowdown, retained with its diagnosis.
 
-A trained EAGLE draft head (Phase 2) reached **0.938x** — a genuine slowdown.
-That is reported as measured, with the diagnosis, in `docs/results.md`.
+[Full results](docs/results.md) · [Methodology](docs/methodology.md) · [Limitations](docs/limitations.md) · [Raw records](results/raw_measurements.jsonl)
 
-To reproduce, double-click `run_all.bat` (or run it from a shell). It
-provisions the environment, downloads the models, runs the correctness tests,
-and then benchmarks. It is resumable: every stage skips itself if its output
-artifact already exists.
+Hardware, model pair, prompt distribution, and decoding settings affect acceptance and throughput. These figures are not universal speedups.
 
-Once the run finishes, `docs/results.md` is regenerated from the raw
-measurements by `scripts/make_results_doc.py`. That file is machine-written; a
-configuration that has not run shows `NOT MEASURED` rather than a number.
+## What the implementation demonstrates
 
----
+- Draft/verify decoding with residual sampling and shared sampling policy.
+- KV-cache handling and rollback after rejected proposals.
+- Interleaved baseline/speculative measurements to reduce ordering and thermal bias.
+- Bootstrap uncertainty, latency breakdowns, and acceptance/cost analysis.
+- A trained draft-head experiment whose negative result exposes the quality/cost tradeoff.
 
-## Why speculative decoding is lossless
+Under the algorithm's assumptions, speculative sampling preserves the target distribution. The synthetic tests provide empirical checks of this implementation; a Monte Carlo test is not a mathematical proof of the entire codebase.
 
-Speculative decoding does not approximate the target model's output distribution.
-The accept/reject rule is constructed so that the marginal distribution of every
-emitted token is **provably identical** to the target distribution. The draft
-model affects only throughput — a better draft improves speed, a poor draft
-falls back gracefully to standard sampling. Quality is unchanged.
+## Start with the right workload
 
-The proof is in `tests/test_sampler_synthetic.py`: a Monte Carlo test over
-synthetic distributions (1,000,000 trials, adversarial cases included) confirms
-that the empirical output distribution matches the target distribution with
-chi-square p > 0.001 and total variation distance within Monte Carlo error.
+| Goal | Requirements | Starting point |
+| --- | --- | --- |
+| Read the study | Browser only | Results and methodology above |
+| Run synthetic correctness checks | Python, CPU PyTorch, project dependencies | CPU path below; no model weights |
+| Reproduce model speedups | Compatible NVIDIA GPU/CUDA, downloaded models | GPU path below |
+| Train/sweep draft heads | GPU environment, training data, disk for hidden-state cache | Phase 2 scripts and methodology |
 
----
+## Environment setup
 
-## Hardware
+Use a separate environment. The published environment used **PyTorch 2.5.1+cu121**; other versions/hardware are new environments to validate, not equivalent benchmark conditions.
 
-| Property | Value |
-|---|---|
-| GPU | NVIDIA GeForce GTX 1650 Ti Mobile (TU117) |
-| VRAM | 4 GB physical, ~3.4 GB usable |
-| Compute capability | SM 7.5 (Turing, no FlashAttention-2) |
-| FP16 | Yes (no bfloat16, no FP8) |
-| Memory bandwidth | 192 GB/s |
-| CPU | AMD Ryzen 7 4800H |
-| System RAM | 16 GB |
-| OS | Windows |
-
----
-
-## Models
-
-| Role | Model | Parameters | FP16 size |
-|---|---|---|---|
-| Target | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | 1.1 B | 2.20 GB |
-| Draft (Phase 1) | `JackFram/llama-68m` | 68 M | 0.14 GB |
-| Draft (Phase 2) | EAGLE head (trained offline) | ~60 M | 0.24 GB |
-
-Both Phase 1 models share the Llama tokenizer (vocabulary size 32,000),
-which is required by the accept/reject rule.
-
----
-
-## Quickstart
-
-### 1. Install dependencies
-
-```powershell
-# CUDA torch build (required — default pip install gives CPU-only)
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
-
-# Project dependencies
-pip install -r requirements.txt
+```bash
+git clone https://github.com/Kartik-A-1820/specbench.git
+cd specbench
+python -m venv .venv
 ```
 
-### 2. Download models
+Activate with `source .venv/bin/activate` on Linux/macOS or `.venv\Scripts\Activate.ps1` in Windows PowerShell. Run all commands from the repository root.
 
-```powershell
+**CPU correctness work:**
+
+```bash
+python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
+python -m pytest tests/test_sampler_synthetic.py -v
+```
+
+The synthetic suite uses repeated Monte Carlo trials and can take time. It does not download models or measure GPU speed.
+
+**GPU benchmark work:** in a separate environment, install the published CUDA build instead of the CPU build:
+
+```bash
+python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+python -m pip install -r requirements.txt
+python scripts/check_env.py
 python scripts/download_models.py
-```
-
-Downloads `TinyLlama-1.1B-Chat-v1.0` and `llama-68m` to `models/`.
-After this step, benchmarking runs fully offline.
-
-### 3. Verify environment (Phase 0)
-
-```powershell
 python scripts/run_vram_probe.py
+python -m pytest tests/ -v -m "not slow"
+python scripts/run_phase1_bench.py --k-values 1 2 3 4 6 8 --temperature 1.0
 ```
 
-Asserts CUDA availability, SM 7.5 capability, FP16 support, and measures
-actual VRAM usage. Results go to `results/vram_probe.json`.
+The environment/probe checks enforce the project's GPU assumptions; a different GPU may need deliberate changes before it can run the same pipeline. First downloads require network access. Subsequent benchmark execution uses local model artifacts.
 
-### 4. Run correctness tests
+`run_all.bat` is a Windows convenience workflow that provisions an environment, downloads models, runs checks, and executes benchmark stages. It uses stage markers to skip completed work. Inspect those markers and result files before interpreting a rerun as a fresh experiment; keep prior results when comparing configurations.
 
-```powershell
-# Fast tests (CPU, no models needed):
-pytest tests/test_sampler_synthetic.py -v
+## Results and reproduction
 
-# Full suite (requires CUDA + downloaded models):
-pytest tests/ -v -m "not slow"
+`scripts/make_results_doc.py` regenerates `docs/results.md` from stored measurements. Edit experiment configuration and rerun measurements rather than typing numbers into generated tables. Unmeasured configurations should remain labeled as such.
 
-# End-to-end distribution test (slow, ~20,000 generation passes):
-pytest tests/test_distribution_match.py -v -m slow
-```
+The slower end-to-end distribution test is marked `slow` and requires real models. Passing synthetic checks alone does not establish every generation path's correctness. Keep model revisions, settings, environment details, raw records, and run provenance with any new result.
 
-### 5. Run Phase 1 benchmark
+## Contribute
 
-```powershell
-# Single K value:
-python scripts/run_phase1_bench.py --K 4
+[CONTRIBUTING.md](CONTRIBUTING.md) describes the review and reproduction workflow. Useful contributions include:
 
-# Sweep K over {1, 2, 4, 8}:
-python scripts/run_phase1_bench.py --sweep-K
-```
+- Reproductions on different hardware with complete environment records.
+- Sampler/cache edge-case tests and small correctness fixes.
+- Broader held-out prompt coverage and transparent draft-head training experiments.
+- Documentation of setup failures, version constraints, and profiler findings.
 
-Results are written to `results/raw_measurements.jsonl` and aggregated to
-`results/summary.json`.
+There is currently no standalone LICENSE file. Clarify intended reuse terms with the maintainer; external model and dataset licenses are separate.
 
----
+## Repository map
 
-## Results Summary
-
-| Configuration | Best K | Speedup | 95% CI | α (tokens/round) |
-|---|---|---|---|---|
-| Phase 1, sampling (T = 1.0) | 3 | 1.321x | 1.235–1.406 | 1.703 |
-| Phase 1, greedy (T = 0.0) | 2 | 1.442x | 1.373–1.510 | 1.722 |
-| Phase 2, EAGLE head | 1 | 0.938x | 0.921–0.956 | 1.074 |
-
-Baselines: 11.40 tokens/s sampling, 11.47 tokens/s greedy, target model only.
-See `docs/results.md` for the full sweep, latency percentiles and per-domain
-breakdown — that file is machine-written from the raw measurements, and a
-configuration that has not run shows `NOT MEASURED` rather than a number.
-
-All reported speedups carry 95% bootstrap confidence intervals computed as
-the ratio of aggregate throughputs (ratio-of-means, paired resampling over
-prompts, B=10,000 resamples). Bare point estimates without intervals are not
-reported.
-
----
-
-## Repository Structure
-
-```
-specbench/
-├── specbench/           Core library
-│   ├── models.py        Model loading, VRAM probes
-│   ├── sampling.py      Shared logits processors
-│   ├── kv.py            KV cache and rollback
-│   ├── spec_decode.py   Speculative decoding loop
-│   ├── baseline.py      Target-only reference
-│   ├── harness.py       Benchmark runner
-│   ├── stats.py         Bootstrap CIs, chi-square, TVD
-│   └── eagle/           Phase 2: EAGLE draft head
-├── tests/               Correctness test suite
-├── scripts/             Setup and benchmark runners
-├── results/             Measurements (gitignored: hidden_states/)
-└── docs/                Architecture, methodology, results, limitations
-```
-
----
-
-## Documentation
-
-- [Architecture](docs/architecture.md) — component breakdown, data flow, KV rollback design
-- [VRAM Budget](docs/vram-budget.md) — arithmetic, rejected configurations, measured values
-- [Methodology](docs/methodology.md) — prompt set, warmup, interleaved A/B design, bootstrap CI
-- [Results](docs/results.md) — all measurements with confidence intervals
-- [Limitations](docs/limitations.md) — honest scope constraints and pending items
-
----
-
-## References
-
-- Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (2023)
-- Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (2023)
-- Li et al., "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty" (2024)
+| Path | Role |
+| --- | --- |
+| `specbench/` | Baseline/speculative decoding, sampling, KV logic, statistics |
+| `specbench/eagle/` | Draft-head collection, training, decoding |
+| `scripts/` | Setup, environment checks, benchmark/report entrypoints |
+| `tests/` | Synthetic and real-model correctness checks |
+| `results/` | Measured summaries, raw records, figures |
+| `docs/` | Architecture, methodology, results, limitations |

@@ -69,11 +69,7 @@ N=20,000 repeated generation passes with real models. It is not run in quick
 
 ## Phase 2 (EAGLE)
 
-**Training data.** The built-in training corpus in `specbench/eagle/collect.py`
-is a small repeated set of ~40 documents. This is sufficient to validate the
-architecture but likely too small and homogeneous to achieve maximum acceptance
-rates. A larger and more diverse corpus (e.g., a slice of C4 or the Pile) would
-be expected to improve acceptance rates.
+**Training data.** Interpret each trained head using its recorded collection metadata and the actual collection script. The checked-in results describe a small-data experiment, not a reproduction of a large-scale EAGLE training recipe.
 
 **Offline collection latency.** Hidden states are cached at 4 KB per token
 (2048 dims, FP16), so the corpus size is bounded by collection time and disk
@@ -96,15 +92,6 @@ training has actually run.
 
 ---
 
-## Numbers Not Yet Available
+## Published versus pending measurements
 
-The following measurements are pending and will be filled in after running the
-benchmark scripts:
-
-- Phase 0: measured VRAM allocation vs. prediction (see `results/vram_probe.json`).
-- Phase 1: speedup by K, latency percentiles, acceptance rate by domain
-  (see `docs/results.md`).
-- Phase 2: EAGLE sweep results and Pareto curve (see `results/pareto.csv`).
-
-No numbers have been fabricated. All reported values will trace directly to
-rows in `results/raw_measurements.jsonl`.
+The repository includes Phase 0 VRAM records, Phase 1 measurements, and Phase 2 sweep results. See [results.md](results.md) and the files under `results/` for the configurations actually measured. A configuration absent from those records is unmeasured; the existence of a script does not establish its result. New runs on another environment should retain separate provenance rather than overwrite the published experiment.
